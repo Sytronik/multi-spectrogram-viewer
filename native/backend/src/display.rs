@@ -181,7 +181,7 @@ pub fn draw_wav(
     let [r, g, b, _] = WAVECOLOR;
     paint.set_color_rgba8(r, g, b, alpha);
     paint.anti_alias = true;
-    if width == 1 || n_short_height < width / 3 {
+    if width == 1 || n_short_height < width * 2 / 3 {
         // println!("min-max rendering. short height ratio: {}", n_short_height as f32 / width as f32);
         let path = {
             let mut pb = PathBuilder::new();
