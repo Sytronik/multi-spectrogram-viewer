@@ -27,7 +27,7 @@ pub type IdChVec = Vec<(usize, usize)>;
 pub type IdChMap<T> = HashMap<(usize, usize), T>;
 pub type SrMap<T> = HashMap<u32, T>;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct DrawOption {
     pub px_per_sec: f64,
     pub height: u32,
@@ -351,12 +351,12 @@ impl TrackManager {
         );
     }
 
-    pub fn get_images(
+    pub fn calc_high_q_images(
         &self,
         id_ch_tuples: &[(usize, usize)],
-        option: &DrawOption,
+        option: DrawOption,
     ) -> IdChMap<Array3<u8>> {
-        let &DrawOption {
+        let DrawOption {
             px_per_sec,
             height,
             blend,
@@ -386,14 +386,65 @@ impl TrackManager {
         result
     }
 
-    pub fn put_low_q_images_to(
+    fn get_grey_sub(
         &self,
-        outputs: &mut [u8],
-        option: &DrawOption,
+        id_ch: &(usize, usize),
         sec: f64,
         width: u32,
+        px_per_sec: f64,
+        wavlen: usize,
+        sr: u32,
+    ) -> Option<GreyF32Image> {
+        let spec_grey = self.spec_greys.get(id_ch).unwrap();
+        let i_w_grey =
+            ((spec_grey.width() as u64 * sr as u64) as f64 * sec / wavlen as f64).round() as isize;
+        let width_grey = ((spec_grey.width() as u64 * width as u64 * sr as u64) as f64
+            / wavlen as f64
+            / px_per_sec as f64)
+            .max(1.)
+            .round() as u32;
+        let (i_w_grey, width_grey) = calc_effective_w(i_w_grey, width_grey, spec_grey.width())?;
+        let im = SubImage::new(
+            spec_grey,
+            i_w_grey as u32,
+            0,
+            width_grey,
+            spec_grey.height(),
+        )
+        .to_image();
+        Some(im)
+    }
+
+    fn get_wav_slice(
+        &self,
+        id: usize,
+        ch: usize,
+        sec: f64,
+        width: u32,
+        px_per_sec: f64,
+    ) -> Option<ArrayView1<f32>> {
+        let track = self.tracks.get(&id).unwrap();
+        let i_sample = (sec * track.sr as f64).max(0.).round() as isize;
+        let n_sample = ((track.sr as u64 * width as u64) as f64 / px_per_sec)
+            .max(1.)
+            .round() as u32;
+        let (i_sample, n_sample) =
+            calc_effective_w(i_sample, n_sample, track.wavs.shape()[1] as u32)?;
+        Some(
+            track
+                .wavs
+                .slice(s![ch, i_sample..i_sample + n_sample as usize]),
+        )
+    }
+
+    pub fn calc_low_q_images_to(
+        &self,
+        outputs: &mut [u8],
+        sec: f64,
+        width: u32,
+        option: DrawOption,
     ) {
-        let &DrawOption {
+        let DrawOption {
             px_per_sec,
             height,
             blend,
@@ -402,81 +453,54 @@ impl TrackManager {
             .par_iter()
             .zip_eq(outputs.par_chunks_exact_mut((width * height * 4) as usize))
             .for_each(|(&(id, ch), output)| {
-                let track = self.tracks.get(&id).unwrap();
-                let spec_grey = self.spec_greys.get(&(id, ch)).unwrap();
-                let wavlen = track.wavs.shape()[1];
-                let total_width = (px_per_sec * wavlen as f64 / track.sr as f64).max(1.);
+                let (wavlen, sr) = {
+                    let track = self.tracks.get(&id).unwrap();
+                    (track.wavs.shape()[1], track.sr)
+                };
 
-                let grey_sub = {
-                    let i_w_grey = ((spec_grey.width() as u64 * track.sr as u64) as f64 * sec
-                        / wavlen as f64)
-                        .round() as isize;
-                    let width_grey = ((spec_grey.width() as u64 * width as u64 * track.sr as u64)
-                        as f64
-                        / wavlen as f64
-                        / px_per_sec as f64)
-                        .max(1.)
-                        .round() as u32;
-                    let (i_w_grey, width_grey) =
-                        match calc_effective_w(i_w_grey, width_grey, spec_grey.width()) {
-                            Some(x) => x,
-                            None => return,
-                        };
-                    SubImage::new(
-                        spec_grey,
-                        i_w_grey as u32,
-                        0,
-                        width_grey,
-                        spec_grey.height(),
-                    )
-                    .to_image()
+                let grey_sub =
+                    match self.get_grey_sub(&(id, ch), sec, width, px_per_sec, wavlen, sr) {
+                        Some(x) => x,
+                        None => return,
+                    };
+                let wav_slice = match self.get_wav_slice(id, ch, sec, width, px_per_sec) {
+                    Some(x) => x,
+                    None => return,
                 };
-                let wav;
-                let wav_slice = {
-                    let i_sample = (sec * track.sr as f64).max(0.).round() as isize;
-                    let n_sample = ((track.sr as u64 * width as u64) as f64 / px_per_sec)
-                        .max(1.)
-                        .round() as u32;
-                    let (i_sample, n_sample) =
-                        match calc_effective_w(i_sample, n_sample, wavlen as u32) {
-                            Some((i, n)) => (i, n as usize),
-                            None => return,
-                        };
-                    wav = track.get_wav(ch);
-                    wav.slice(s![i_sample..i_sample + n_sample])
-                };
-                // let ratio = (px_per_sec * wavlen as f32 / track.sr as f32);
-                let pad_left = -(sec * px_per_sec).min(0.).round() as u32;
+
+                let total_width = (px_per_sec * wavlen as f64 / sr as f64).max(1.);
+                let pad_left = (-sec * px_per_sec).max(0.).round() as u32;
                 let pad_right = ((sec * px_per_sec + width as f64 - total_width)
                     .max(0.)
                     .round() as u32)
                     .min(width - pad_left);
 
                 let drawing_width = width - pad_left - pad_right;
+                if drawing_width == 0 {
+                    return;
+                }
                 if drawing_width == width {
                     display::blend_spec_wav(
                         output, &grey_sub, wav_slice, width, height, blend, true,
                     );
-                } else if drawing_width > 0 {
-                    let mut arr = Array3::zeros((height as usize, drawing_width as usize, 4));
-                    display::blend_spec_wav(
-                        arr.as_slice_mut().unwrap(),
-                        &grey_sub,
-                        wav_slice,
-                        drawing_width,
-                        height,
-                        blend,
-                        true,
-                    );
-                    let mut out_view =
-                        ArrayViewMut3::from_shape((height as usize, width as usize, 4), output)
-                            .unwrap();
-                    out_view.indexed_iter_mut().for_each(|((h, w, i), x)| {
-                        if (pad_left as usize) < w && w < (width - pad_right) as usize {
-                            *x = arr[[h, w - pad_left as usize, i]];
-                        }
-                    });
+                    return;
                 }
+                let mut drawing = Array3::zeros((height as usize, drawing_width as usize, 4));
+                display::blend_spec_wav(
+                    drawing.as_slice_mut().unwrap(),
+                    &grey_sub,
+                    wav_slice,
+                    drawing_width,
+                    height,
+                    blend,
+                    true,
+                );
+                let mut out_view =
+                    ArrayViewMut3::from_shape((height as usize, width as usize, 4), output)
+                        .unwrap();
+                drawing.indexed_iter().for_each(|((h, w, i), &x)| {
+                    out_view[[h, w + pad_left as usize, i]] = x;
+                });
             });
     }
 
@@ -513,7 +537,7 @@ impl TrackManager {
     }
 
     pub fn get_all_id_ch(&self) -> IdChVec {
-        self.specs.keys().map(|&tup| tup).collect()
+        self.specs.keys().cloned().collect()
     }
 
     pub fn get_id_ch_tuples_from(&self, id_list: &[usize]) -> IdChVec {

@@ -11,9 +11,9 @@ use thesia_backend::*;
 lazy_static! {
     static ref TM: RwLock<TrackManager> = RwLock::new(TrackManager::new());
     static ref DRAWOPTION: RwLock<DrawOption> = RwLock::new(DrawOption {
-        px_per_sec: 100.,
-        height: 250,
-        blend: 0.3,
+        px_per_sec: 0.,
+        height: 1,
+        blend: 0.,
     });
     static ref IMAGES: RwLock<IdChMap<Array3<u8>>> = RwLock::new(IdChMap::new());
 }
@@ -91,7 +91,7 @@ fn add_tracks(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 } else {
                     tm.get_id_ch_tuples_from(new_track_ids.as_slice())
                 },
-                option: DRAWOPTION.read().unwrap().clone(),
+                option: *DRAWOPTION.read().unwrap(),
             }
             .schedule(callback);
             Ok(cx.undefined())
@@ -112,11 +112,171 @@ fn remove_track(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     if tm.remove_track(track_id) {
         RenderingTask {
             id_ch_tuples: tm.get_all_id_ch(),
-            option: DRAWOPTION.read().unwrap().clone(),
+            option: *DRAWOPTION.read().unwrap(),
         }
         .schedule(callback);
     }
     Ok(cx.undefined())
+}
+
+fn _crop_high_q_images<'a>(
+    cx: &mut FunctionContext<'a>,
+    sec: f64,
+    width: u32,
+    option: DrawOption,
+) -> JsResult<'a, JsObject> {
+    let obj = JsObject::new(cx);
+    let images = IMAGES.read().unwrap();
+    let id_ch_tuples: IdChVec = images.keys().cloned().collect();
+    let arr = JsArray::new(cx, images.len() as u32);
+    for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
+        let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
+        arr.set(cx, i as u32, id_ch_jsstr)?;
+    }
+    let mut buf = JsArrayBuffer::new(cx, images.len() as u32 * width * option.height * 4)?;
+    cx.borrow_mut(&mut buf, |borrowed| {
+        id_ch_tuples
+            .into_par_iter()
+            .zip(
+                borrowed
+                    .as_mut_slice()
+                    .par_chunks_exact_mut((width * option.height * 4) as usize),
+            )
+            .for_each(|(id_ch, output)| {
+                let image = images.get(&id_ch).unwrap();
+                let total_w = image.len() / 4 / option.height as usize;
+                let i_w = (sec * total_w as f64 / option.px_per_sec) as isize;
+                let (i_w_eff, width_eff) = match calc_effective_w(i_w, width, total_w as u32) {
+                    Some((i, w)) => (i as isize, w as isize),
+                    None => return,
+                };
+
+                let mut out_view =
+                    ArrayViewMut3::from_shape((option.height as usize, width as usize, 4), output)
+                        .unwrap();
+                image
+                    .slice_axis(Axis(1), Slice::new(i_w_eff, Some(i_w_eff + width_eff), 1))
+                    .indexed_iter()
+                    .for_each(|((h, w, i), x)| {
+                        out_view[[h, (w as isize - i_w.min(0)) as usize, i]] = *x;
+                    });
+            });
+    });
+    obj.set(cx, "id_ch_arr", arr)?;
+    obj.set(cx, "buf", buf)?;
+    Ok(obj)
+}
+
+fn _get_low_q_images<'a>(
+    cx: &mut FunctionContext<'a>,
+    sec: f64,
+    width: u32,
+    option: DrawOption,
+    callback: Handle<JsFunction>,
+) -> JsResult<'a, JsObject> {
+    let obj = JsObject::new(cx);
+    if option != *DRAWOPTION.read().unwrap() {
+        RenderingTask {
+            id_ch_tuples: TM.read().unwrap().get_all_id_ch(),
+            option: option,
+        }
+        .schedule(callback);
+    }
+    let tm = TM.read().unwrap();
+    let id_ch_tuples = tm.get_all_id_ch();
+    let arr = JsArray::new(cx, id_ch_tuples.len() as u32);
+    for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
+        let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
+        arr.set(cx, i as u32, id_ch_jsstr)?;
+    }
+    let mut buf = JsArrayBuffer::new(cx, id_ch_tuples.len() as u32 * width * option.height * 4)?;
+    cx.borrow_mut(&mut buf, |borrowed| {
+        tm.calc_low_q_images_to(borrowed.as_mut_slice(), sec, width, option);
+    });
+    obj.set(cx, "id_ch_arr", arr)?;
+    obj.set(cx, "buf", buf)?;
+    Ok(obj)
+}
+
+fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
+    let sec = get_num_arg!(cx, 0);
+    let width = get_num_arg!(cx, 1, u32);
+    let option = {
+        let object = cx.argument::<JsObject>(2)?;
+        let px_per_sec = get_num_field!(object, cx, "px_per_sec");
+        let height = get_num_field!(object, cx, "height", u32);
+        let blend = get_num_field!(object, cx, "blend");
+        DrawOption {
+            px_per_sec,
+            height,
+            blend,
+        }
+    };
+    let callback = cx.argument::<JsFunction>(3)?;
+
+    // dbg!(sec, width, &option);
+
+    if IMAGES.try_read().is_ok() && option == *DRAWOPTION.read().unwrap() {
+        let start = Instant::now();
+        let obj = _crop_high_q_images(&mut cx, sec, width, option);
+        println!("Copy high q: {:?}", start.elapsed());
+        obj
+    } else {
+        let start = Instant::now();
+        let obj = _get_low_q_images(&mut cx, sec, width, option, callback);
+        println!("Draw low q: {:?}", start.elapsed());
+        obj
+    }
+}
+#[derive(Clone)]
+struct RenderingTask {
+    id_ch_tuples: IdChVec,
+    option: DrawOption,
+}
+
+impl Task for RenderingTask {
+    type Output = Option<IdChVec>;
+    type Error = ();
+    type JsEvent = JsArray;
+
+    fn perform(&self) -> Result<Self::Output, Self::Error> {
+        if *DRAWOPTION.read().unwrap() == self.option {
+            Ok(None)
+        } else if let Ok(mut images) = IMAGES.try_write() {
+            let new = TM
+                .read()
+                .unwrap()
+                .calc_high_q_images(self.id_ch_tuples.as_slice(), self.option);
+            let id_ch_tuples = new.keys().map(|&tup| tup).collect();
+            // while (true) {}
+            images.extend(new);
+            *DRAWOPTION.write().unwrap() = self.option;
+            Ok(Some(id_ch_tuples))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn complete<'a>(
+        self,
+        mut cx: TaskContext<'a>,
+        id_ch_tuples: Result<Self::Output, Self::Error>,
+    ) -> JsResult<Self::JsEvent> {
+        match id_ch_tuples {
+            // Ok(Some(tuples)) => {
+            Ok(Some(tuples)) if self.option == *DRAWOPTION.read().unwrap() => {
+                let arr = JsArray::new(&mut cx, tuples.len() as u32);
+                for (i, &(id, ch)) in tuples.iter().enumerate() {
+                    let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
+                    arr.set(&mut cx, i as u32, id_ch_jsstr)?;
+                }
+                Ok(arr)
+            }
+            Ok(Some(_)) => Ok(cx.empty_array()),
+            Ok(None) => cx.throw_error("no need to refresh."),
+            Err(_) => cx.throw_error("Unknown error!"),
+        }
+    }
 }
 
 fn get_max_db(mut cx: FunctionContext) -> JsResult<JsNumber> {
@@ -170,147 +330,6 @@ fn get_colormap(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
             })
     });
     Ok(buf)
-}
-
-fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
-    let sec = get_num_arg!(cx, 0);
-    let width = get_num_arg!(cx, 1, u32);
-    let option = {
-        let object = cx.argument::<JsObject>(2)?;
-        let px_per_sec = get_num_field!(object, cx, "px_per_sec");
-        let height = get_num_field!(object, cx, "height", u32);
-        let blend = get_num_field!(object, cx, "blend");
-        DrawOption {
-            px_per_sec,
-            height,
-            blend,
-        }
-    };
-    let callback = cx.argument::<JsFunction>(3)?;
-
-    // dbg!(sec, width, &option);
-
-    let obj = JsObject::new(&mut cx);
-    let (arr, buf) = if IMAGES.try_read().is_ok() && option == *DRAWOPTION.read().unwrap() {
-        let images = IMAGES.read().unwrap();
-        let start = Instant::now();
-        let id_ch_tuples: IdChVec = images.keys().cloned().collect();
-        let arr = JsArray::new(&mut cx, images.len() as u32);
-        for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
-            let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
-            arr.set(&mut cx, i as u32, id_ch_jsstr)?;
-        }
-        let mut buf = JsArrayBuffer::new(&mut cx, images.len() as u32 * width * option.height * 4)?;
-        cx.borrow_mut(&mut buf, |borrowed| {
-            id_ch_tuples
-                .into_par_iter()
-                .zip(
-                    borrowed
-                        .as_mut_slice()
-                        .par_chunks_exact_mut((width * option.height * 4) as usize),
-                )
-                .for_each(|(id_ch, output)| {
-                    let image = images.get(&id_ch).unwrap();
-                    let total_w = image.len() / 4 / option.height as usize;
-                    let i_w = (sec * total_w as f64 / option.px_per_sec) as isize;
-                    let (i_w_eff, width_eff) = match calc_effective_w(i_w, width, total_w as u32) {
-                        Some((i, w)) => (i as isize, w as isize),
-                        None => return,
-                    };
-
-                    let mut out_view = ArrayViewMut3::from_shape(
-                        (option.height as usize, width as usize, 4),
-                        output,
-                    )
-                    .unwrap();
-                    image
-                        .slice_axis(Axis(1), Slice::new(i_w_eff, Some(i_w_eff + width_eff), 1))
-                        .indexed_iter()
-                        .for_each(|((h, w, i), x)| {
-                            out_view[[h, (w as isize - i_w.min(0)) as usize, i]] = *x;
-                        });
-                });
-        });
-        println!("Copy high q: {:?}", start.elapsed());
-        (arr, buf)
-    } else {
-        if option != *DRAWOPTION.read().unwrap() {
-            RenderingTask {
-                id_ch_tuples: TM.read().unwrap().get_all_id_ch(),
-                option: option.clone(),
-            }
-            .schedule(callback);
-        }
-        let start = Instant::now();
-        let tm = TM.read().unwrap();
-        let id_ch_tuples = tm.get_all_id_ch();
-        let arr = JsArray::new(&mut cx, id_ch_tuples.len() as u32);
-        for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
-            let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
-            arr.set(&mut cx, i as u32, id_ch_jsstr)?;
-        }
-        let mut buf = JsArrayBuffer::new(
-            &mut cx,
-            id_ch_tuples.len() as u32 * width * option.height * 4,
-        )?;
-        cx.borrow_mut(&mut buf, |borrowed| {
-            tm.put_low_q_images_to(borrowed.as_mut_slice(), &option, sec, width);
-        });
-        println!("Draw low q: {:?}", start.elapsed());
-        (arr, buf)
-    };
-    obj.set(&mut cx, "id_ch_arr", arr)?;
-    obj.set(&mut cx, "buf", buf)?;
-    Ok(obj)
-}
-
-#[derive(Clone)]
-struct RenderingTask {
-    id_ch_tuples: IdChVec,
-    option: DrawOption,
-}
-
-impl Task for RenderingTask {
-    type Output = Option<IdChVec>;
-    type Error = ();
-    type JsEvent = JsArray;
-
-    fn perform(&self) -> Result<Self::Output, Self::Error> {
-        if let Ok(mut images) = IMAGES.try_write() {
-            let new = TM
-                .read()
-                .unwrap()
-                .get_images(self.id_ch_tuples.as_slice(), &self.option);
-            let id_ch_tuples = new.keys().map(|&tup| tup).collect();
-            // while (true) {}
-            images.extend(new);
-            *DRAWOPTION.write().unwrap() = self.option.clone();
-            Ok(Some(id_ch_tuples))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn complete<'a>(
-        self,
-        mut cx: TaskContext<'a>,
-        id_ch_tuples: Result<Self::Output, Self::Error>,
-    ) -> JsResult<Self::JsEvent> {
-        match id_ch_tuples {
-            // Ok(Some(tuples)) => {
-            Ok(Some(tuples)) if self.option == *DRAWOPTION.read().unwrap() => {
-                let arr = JsArray::new(&mut cx, tuples.len() as u32);
-                for (i, &(id, ch)) in tuples.iter().enumerate() {
-                    let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
-                    arr.set(&mut cx, i as u32, id_ch_jsstr)?;
-                }
-                Ok(arr)
-            }
-            Ok(Some(_)) => Ok(cx.empty_array()),
-            Ok(None) => cx.throw_error("no need to refresh."),
-            Err(_) => cx.throw_error("Unknown error!"),
-        }
-    }
 }
 
 register_module!(mut m, {
