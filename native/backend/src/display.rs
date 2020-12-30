@@ -1,14 +1,14 @@
-use std::error::Error as stdError;
-use std::time::Instant;
+// use std::time::Instant;
 
 use image::{ImageBuffer, Luma, Rgba};
 use imageproc::pixelops::interpolate;
 use ndarray::prelude::*;
 use ndarray_stats::QuantileExt;
-use resize::{self, Pixel::GrayF32, Type as ResizeType};
+use resize::{self, Pixel::GrayF32};
 use tiny_skia::{Canvas, FillRule, LineCap, Paint, PathBuilder, PixmapMut, Rect, Stroke};
 
 pub type GreyF32Image = ImageBuffer<Luma<f32>, Vec<f32>>;
+pub type ResizeType = resize::Type;
 
 pub const COLORMAP: [Rgba<u8>; 10] = [
     Rgba([0, 0, 4, 255]),
@@ -57,30 +57,43 @@ pub fn blend_spec_wav(
     width: u32,
     height: u32,
     blend: f64,
-) -> Result<(), Box<dyn stdError>> {
+    fast_resize: bool,
+) {
     let pixmap = PixmapMut::from_bytes(output, width, height).unwrap();
     let mut canvas = Canvas::from(pixmap);
 
     // spec
     if blend > 0. {
-        let start = Instant::now();
-        colorize_grey_with_size(canvas.pixmap().data_mut(), spec_grey, width, height);
-        println!("drawing spec: {:?}", start.elapsed());
+        // let start = Instant::now();
+        let resizetype = if fast_resize {
+            ResizeType::Point
+        } else {
+            ResizeType::Lanczos3
+        };
+        colorize_grey_with_size(
+            canvas.pixmap().data_mut(),
+            spec_grey,
+            width,
+            height,
+            resizetype,
+        );
+
+        // println!("drawing spec: {:?}", start.elapsed());
     }
 
     if blend < 1. {
         // black
-        let start = Instant::now();
+        // let start = Instant::now();
         if blend < 0.5 {
             let rect = Rect::from_xywh(0., 0., width as f32, height as f32).unwrap();
             let mut paint = Paint::default();
             paint.set_color_rgba8(0, 0, 0, (255. * (1. - 2. * blend)) as u8);
             canvas.fill_rect(rect, &paint);
         }
-        println!("drawing blackbox: {:?}", start.elapsed());
+        // println!("drawing blackbox: {:?}", start.elapsed());
 
         // wave
-        let start = Instant::now();
+        // let start = Instant::now();
         draw_wav(
             canvas.pixmap().data_mut(),
             wav,
@@ -89,20 +102,24 @@ pub fn blend_spec_wav(
             (255. * (2. - 2. * blend).min(1.)) as u8,
             (-1., 1.),
         );
-        println!("drawing wav: {:?}", start.elapsed());
+        // println!("drawing wav: {:?}", start.elapsed());
     }
-
-    Ok(())
 }
 
-pub fn colorize_grey_with_size(output: &mut [u8], grey: &GreyF32Image, width: u32, height: u32) {
+pub fn colorize_grey_with_size(
+    output: &mut [u8],
+    grey: &GreyF32Image,
+    width: u32,
+    height: u32,
+    resizetype: ResizeType,
+) {
     let mut resizer = resize::new(
         grey.width() as usize,
         grey.height() as usize,
         width as usize,
         height as usize,
         GrayF32,
-        ResizeType::Lanczos3,
+        resizetype,
     );
     let mut resized = vec![0f32; (width * height) as usize];
     resizer.resize(grey.as_raw(), &mut resized);
@@ -128,7 +145,17 @@ pub fn draw_wav(
 ) {
     let amp_to_height_px =
         |x: f32| ((amp_range.1 - x) * height as f32 / (amp_range.1 - amp_range.0));
-    let samples_per_px = wav.len() as f32 / width as f32;
+    let mut samples_per_px = wav.len() as f32 / width as f32;
+    let wav = if samples_per_px >= 2. {
+        CowArray::from(wav)
+    } else {
+        let new_len = (wav.len() as f32 / samples_per_px).round() as usize;
+        let mut new_wav = CowArray::from(Array1::<f32>::zeros(new_len));
+        let mut resizer = resize::new(wav.len(), 1, new_len, 1, GrayF32, ResizeType::Triangle);
+        resizer.resize(wav.as_slice().unwrap(), new_wav.as_slice_mut().unwrap());
+        samples_per_px = new_len as f32 / width as f32;
+        new_wav
+    };
     let mut max_envelope = Vec::<f32>::with_capacity(width as usize);
     let mut min_envelope = Vec::<f32>::with_capacity(width as usize);
     let mut avg_envelope = Vec::<f32>::with_capacity(width as usize);

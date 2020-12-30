@@ -18,7 +18,7 @@ function App() {
       </div>
       <div>
         <ColorBar />
-        <MainViewer />
+        <MainViewer native={p.native} />
       </div>
     </div>
   );

@@ -1,13 +1,21 @@
 use std::sync::RwLock;
-// use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use lazy_static::{initialize, lazy_static};
+use ndarray::{Array3, ArrayViewMut3, Axis, Slice};
 use neon::prelude::*;
+use rayon::prelude::*;
 
 use thesia_backend::*;
 
 lazy_static! {
     static ref TM: RwLock<TrackManager> = RwLock::new(TrackManager::new());
+    static ref DRAWOPTION: RwLock<DrawOption> = RwLock::new(DrawOption {
+        px_per_sec: 100.,
+        height: 250,
+        blend: 0.3,
+    });
+    static ref IMAGES: RwLock<IdChMap<Array3<u8>>> = RwLock::new(IdChMap::new());
 }
 
 macro_rules! get_track {
@@ -25,6 +33,12 @@ macro_rules! get_track {
 macro_rules! get_num_arg {
     ($cx:expr, $i_arg:expr $(, $type:ty)?) => {
         $cx.argument::<JsNumber>($i_arg)?.value() $(as $type)?
+    };
+}
+
+macro_rules! get_num_field {
+    ($obj:expr, $cx:expr, $key:expr $(, $type:ty)?) => {
+        $obj.get(&mut $cx, $key)?.downcast::<JsNumber>().unwrap().value() $(as $type)?
     };
 }
 
@@ -64,38 +78,45 @@ macro_rules! get_arr_arg {
     };
 }
 
-fn add_tracks(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+fn add_tracks(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let new_track_ids: Vec<usize> = get_arr_arg!(cx, 0, JsNumber, usize);
     let new_paths: Vec<String> = get_arr_arg!(cx, 1, JsString, "");
-    match TM.write().unwrap().add_tracks(new_track_ids, new_paths) {
-        Ok(b) => Ok(cx.boolean(b)),
+    let callback = cx.argument::<JsFunction>(2)?;
+    let mut tm = TM.write().unwrap();
+    match tm.add_tracks(new_track_ids.as_slice(), new_paths) {
+        Ok(should_draw_all) => {
+            RenderingTask {
+                id_ch_tuples: if should_draw_all {
+                    tm.get_all_id_ch()
+                } else {
+                    tm.get_id_ch_tuples_from(new_track_ids.as_slice())
+                },
+                option: DRAWOPTION.read().unwrap().clone(),
+            }
+            .schedule(callback);
+            Ok(cx.undefined())
+        }
         Err(_) => cx.throw_error("Unsupported file type!"),
     }
 }
 
-fn remove_track(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+fn remove_track(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let track_id = get_num_arg!(cx, 0, usize);
-
-    Ok(cx.boolean(TM.write().unwrap().remove_track(track_id)))
-}
-
-fn get_spec_wav_image(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
-    let track_id = get_num_arg!(cx, 0, usize);
-    let ch = get_num_arg!(cx, 1, usize);
-    let width = get_num_arg!(cx, 2, u32);
-    let height = get_num_arg!(cx, 3, u32);
-    let blend = get_num_arg!(cx, 4);
-    if width * height == 0 {
-        return cx.throw_error("zero width or height!");
+    let callback = cx.argument::<JsFunction>(1)?;
+    let mut tm = TM.write().unwrap();
+    let mut images = IMAGES.write().unwrap();
+    let id_ch_tuples = tm.get_id_ch_tuples_from(&[track_id]);
+    for tup in id_ch_tuples.iter() {
+        images.remove(tup);
     }
-    let mut buf = JsArrayBuffer::new(&mut cx, width * height * 4u32)?;
-    cx.borrow_mut(&mut buf, |slice| {
-        let locked = TM.read().unwrap();
-        locked
-            .get_spec_wav_image(slice.as_mut_slice(), track_id, ch, width, height, blend)
-            .unwrap();
-    });
-    Ok(buf)
+    if tm.remove_track(track_id) {
+        RenderingTask {
+            id_ch_tuples: tm.get_all_id_ch(),
+            option: DRAWOPTION.read().unwrap().clone(),
+        }
+        .schedule(callback);
+    }
+    Ok(cx.undefined())
 }
 
 fn get_max_db(mut cx: FunctionContext) -> JsResult<JsNumber> {
@@ -139,8 +160,8 @@ fn get_filename(mut cx: FunctionContext) -> JsResult<JsString> {
 fn get_colormap(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
     let (c_iter, len) = get_colormap_iter_size();
     let mut buf = JsArrayBuffer::new(&mut cx, len as u32)?;
-    cx.borrow_mut(&mut buf, |slice| {
-        slice
+    cx.borrow_mut(&mut buf, |borrowed| {
+        borrowed
             .as_mut_slice()
             .iter_mut()
             .zip(c_iter)
@@ -151,85 +172,153 @@ fn get_colormap(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
     Ok(buf)
 }
 
-struct GetSpecImageTask {
-    track_id: usize,
-    ch: usize,
-    width: u32,
-    height: u32,
-    blend: f64,
-}
-
-impl Task for GetSpecImageTask {
-    type Output = Vec<u8>;
-    type Error = String;
-    type JsEvent = JsArrayBuffer;
-
-    fn perform(&self) -> Result<Vec<u8>, String> {
-        let locked = TM.read().unwrap();
-        let mut vec = vec![0u8; (self.width * self.height * 4) as usize];
-        if let Err(e) = locked.get_spec_wav_image(
-            vec.as_mut_slice(),
-            self.track_id,
-            self.ch,
-            self.width,
-            self.height,
-            self.blend,
-        ) {
-            return Err(e.to_string());
-        }
-        Ok(vec)
-    }
-
-    fn complete(
-        self,
-        mut cx: TaskContext,
-        result: Result<Vec<u8>, String>,
-    ) -> JsResult<JsArrayBuffer> {
-        match result {
-            Ok(vec) => {
-                let mut buf = JsArrayBuffer::new(&mut cx, self.width * self.height * 4)?;
-                cx.borrow_mut(&mut buf, |slice| {
-                    slice
-                        .as_mut_slice()
-                        .iter_mut()
-                        .zip(vec.into_iter())
-                        .for_each(|(y, x)| *y = x)
-                });
-                Ok(buf)
-            }
-            Err(e) => cx.throw_error(e),
-        }
-    }
-}
-impl GetSpecImageTask {
-    fn perform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-        let track_id = get_num_arg!(cx, 0, usize);
-        let ch = get_num_arg!(cx, 1, usize);
-        let width = get_num_arg!(cx, 2, u32);
-        let height = get_num_arg!(cx, 3, u32);
-        let blend = get_num_arg!(cx, 4);
-        let callback = cx.argument::<JsFunction>(5)?;
-        if width * height == 0 {
-            return cx.throw_error("zero width or height!");
-        }
-        let task = GetSpecImageTask {
-            track_id,
-            ch,
-            width,
+fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
+    let sec = get_num_arg!(cx, 0);
+    let width = get_num_arg!(cx, 1, u32);
+    let option = {
+        let object = cx.argument::<JsObject>(2)?;
+        let px_per_sec = get_num_field!(object, cx, "px_per_sec");
+        let height = get_num_field!(object, cx, "height", u32);
+        let blend = get_num_field!(object, cx, "blend");
+        DrawOption {
+            px_per_sec,
             height,
             blend,
-        };
-        task.schedule(callback);
-        Ok(cx.undefined())
+        }
+    };
+    let callback = cx.argument::<JsFunction>(3)?;
+
+    // dbg!(sec, width, &option);
+
+    let obj = JsObject::new(&mut cx);
+    let (arr, buf) = if IMAGES.try_read().is_ok() && option == *DRAWOPTION.read().unwrap() {
+        let images = IMAGES.read().unwrap();
+        let start = Instant::now();
+        let id_ch_tuples: IdChVec = images.keys().cloned().collect();
+        let arr = JsArray::new(&mut cx, images.len() as u32);
+        for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
+            let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
+            arr.set(&mut cx, i as u32, id_ch_jsstr)?;
+        }
+        let mut buf = JsArrayBuffer::new(&mut cx, images.len() as u32 * width * option.height * 4)?;
+        cx.borrow_mut(&mut buf, |borrowed| {
+            id_ch_tuples
+                .into_par_iter()
+                .zip(
+                    borrowed
+                        .as_mut_slice()
+                        .par_chunks_exact_mut((width * option.height * 4) as usize),
+                )
+                .for_each(|(id_ch, output)| {
+                    let image = images.get(&id_ch).unwrap();
+                    let total_w = image.len() / 4 / option.height as usize;
+                    let i_w = (sec * total_w as f64 / option.px_per_sec) as isize;
+                    let (i_w_eff, width_eff) = match calc_effective_w(i_w, width, total_w as u32) {
+                        Some((i, w)) => (i as isize, w as isize),
+                        None => return,
+                    };
+
+                    let mut out_view = ArrayViewMut3::from_shape(
+                        (option.height as usize, width as usize, 4),
+                        output,
+                    )
+                    .unwrap();
+                    image
+                        .slice_axis(Axis(1), Slice::new(i_w_eff, Some(i_w_eff + width_eff), 1))
+                        .indexed_iter()
+                        .for_each(|((h, w, i), x)| {
+                            out_view[[h, (w as isize - i_w.min(0)) as usize, i]] = *x;
+                        });
+                });
+        });
+        println!("Copy high q: {:?}", start.elapsed());
+        (arr, buf)
+    } else {
+        if option != *DRAWOPTION.read().unwrap() {
+            RenderingTask {
+                id_ch_tuples: TM.read().unwrap().get_all_id_ch(),
+                option: option.clone(),
+            }
+            .schedule(callback);
+        }
+        let start = Instant::now();
+        let tm = TM.read().unwrap();
+        let id_ch_tuples = tm.get_all_id_ch();
+        let arr = JsArray::new(&mut cx, id_ch_tuples.len() as u32);
+        for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
+            let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
+            arr.set(&mut cx, i as u32, id_ch_jsstr)?;
+        }
+        let mut buf = JsArrayBuffer::new(
+            &mut cx,
+            id_ch_tuples.len() as u32 * width * option.height * 4,
+        )?;
+        cx.borrow_mut(&mut buf, |borrowed| {
+            tm.put_low_q_images_to(borrowed.as_mut_slice(), &option, sec, width);
+        });
+        println!("Draw low q: {:?}", start.elapsed());
+        (arr, buf)
+    };
+    obj.set(&mut cx, "id_ch_arr", arr)?;
+    obj.set(&mut cx, "buf", buf)?;
+    Ok(obj)
+}
+
+#[derive(Clone)]
+struct RenderingTask {
+    id_ch_tuples: IdChVec,
+    option: DrawOption,
+}
+
+impl Task for RenderingTask {
+    type Output = Option<IdChVec>;
+    type Error = ();
+    type JsEvent = JsArray;
+
+    fn perform(&self) -> Result<Self::Output, Self::Error> {
+        if let Ok(mut images) = IMAGES.try_write() {
+            let new = TM
+                .read()
+                .unwrap()
+                .get_images(self.id_ch_tuples.as_slice(), &self.option);
+            let id_ch_tuples = new.keys().map(|&tup| tup).collect();
+            // while (true) {}
+            images.extend(new);
+            *DRAWOPTION.write().unwrap() = self.option.clone();
+            Ok(Some(id_ch_tuples))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn complete<'a>(
+        self,
+        mut cx: TaskContext<'a>,
+        id_ch_tuples: Result<Self::Output, Self::Error>,
+    ) -> JsResult<Self::JsEvent> {
+        match id_ch_tuples {
+            // Ok(Some(tuples)) => {
+            Ok(Some(tuples)) if self.option == *DRAWOPTION.read().unwrap() => {
+                let arr = JsArray::new(&mut cx, tuples.len() as u32);
+                for (i, &(id, ch)) in tuples.iter().enumerate() {
+                    let id_ch_jsstr = cx.string(format!("{}_{}", id, ch));
+                    arr.set(&mut cx, i as u32, id_ch_jsstr)?;
+                }
+                Ok(arr)
+            }
+            Ok(Some(_)) => Ok(cx.empty_array()),
+            Ok(None) => cx.throw_error("no need to refresh."),
+            Err(_) => cx.throw_error("Unknown error!"),
+        }
     }
 }
 
 register_module!(mut m, {
     initialize(&TM);
+    initialize(&DRAWOPTION);
+    initialize(&IMAGES);
     m.export_function("addTracks", add_tracks)?;
     m.export_function("removeTrack", remove_track)?;
-    m.export_function("getSpecWavImage", get_spec_wav_image)?;
-    m.export_function("getSpecWavImageAsync", GetSpecImageTask::perform)?;
     m.export_function("getMaxdB", get_max_db)?;
     m.export_function("getMindB", get_min_db)?;
     m.export_function("getNumCh", get_n_ch)?;
@@ -238,5 +327,6 @@ register_module!(mut m, {
     m.export_function("getPath", get_path)?;
     m.export_function("getFileName", get_filename)?;
     m.export_function("getColormap", get_colormap)?;
+    m.export_function("getImages", get_images)?;
     Ok(())
 });
