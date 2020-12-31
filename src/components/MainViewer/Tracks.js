@@ -49,16 +49,19 @@ function Tracks({ width, track_ids, getImages }) {
       if ((e.shiftKey && y_is_larger) || !y_is_larger) {
         setHeight(Math.round(Math.max(height * (1 + delta / 1000), 10)));
       } else {
-        draw_option.current.px_per_sec = Math.max(
-          draw_option.current.px_per_sec * (1 + e.deltaY / 1000),
-          0.,
+        const px_per_sec = Math.min(
+          Math.max(draw_option.current.px_per_sec * (1 + e.deltaY / 1000), 0.),
+          384000
         );
-        await throttled_draw();
+        if (draw_option.current.px_per_sec !== px_per_sec) {
+          draw_option.current.px_per_sec = px_per_sec;
+          await throttled_draw();
+        }
       }
     } else if ((e.shiftKey && y_is_larger) || !y_is_larger) {
       e.preventDefault();
       e.stopPropagation();
-      sec.current += delta / 200;
+      sec.current += delta / draw_option.current.px_per_sec;
       await throttled_draw();
     }
   }
