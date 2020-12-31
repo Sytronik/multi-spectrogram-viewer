@@ -1,5 +1,5 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
-import { throttle } from 'throttle-debounce';
+import { throttle, debounce } from 'throttle-debounce';
 
 import { SplitView } from "./SplitView";
 import TrackInfo from "./TrackInfo";
@@ -55,23 +55,23 @@ function Tracks({ width, track_ids, getImages }) {
         );
         if (draw_option.current.px_per_sec !== px_per_sec) {
           draw_option.current.px_per_sec = px_per_sec;
-          await throttled_draw();
+          throttled_draw();
         }
       }
     } else if ((e.shiftKey && y_is_larger) || !y_is_larger) {
       e.preventDefault();
       e.stopPropagation();
       sec.current += delta / draw_option.current.px_per_sec;
-      await throttled_draw();
+      throttled_draw();
     }
   }
   const draw = useCallback(
     async () => {
       const { id_ch_arr, buf } = getImages(
         sec.current, width, { ...draw_option.current, height: height },
-        async (_, arr) => {
+        (_, arr) => {
           if (arr) {
-            await draw();
+            debounced_draw();
           }
         }
       );
@@ -88,6 +88,7 @@ function Tracks({ width, track_ids, getImages }) {
       }
     }, [height, width]);
   const throttled_draw = useCallback(throttle(1000 / 120, draw), [draw]);
+  const debounced_draw = useCallback(debounce(1000 / 120, draw), [draw]);
   useEffect(() => throttled_draw(), [draw, height, width]);
 
   return (
