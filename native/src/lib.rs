@@ -224,6 +224,11 @@ fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
             }
             .schedule(callback);
         }
+        if let Ok(mut images) = IMAGES.try_write() {
+            if too_large && !images.is_empty() {
+                images.clear();
+            }
+        }
         let obj = _get_low_q_images(&mut cx, sec, width, option, !too_large);
         {
             let high_or_low = if too_large { "high" } else { "low" };
