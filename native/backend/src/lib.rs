@@ -25,6 +25,8 @@ pub type IdChVec = Vec<(usize, usize)>;
 pub type IdChMap<T> = HashMap<(usize, usize), T>;
 pub type SrMap<T> = HashMap<u32, T>;
 
+const MIN_WIDTH: u32 = 1;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct DrawOption {
     pub px_per_sec: f64,
@@ -32,7 +34,7 @@ pub struct DrawOption {
     pub blend: f64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum FreqScale {
     Linear,
     Mel,
@@ -168,15 +170,11 @@ impl TrackManager {
         }
     }
 
-    fn calc_window(win_length: usize, n_fft: usize) -> Array1<f32> {
-        windows::hann(win_length, false) / n_fft as f32
-    }
-
     fn update_specs(&mut self, id_list: &[usize], new_sr_set: HashSet<(u32, usize, usize)>) {
         self.windows.par_extend(
             new_sr_set
                 .par_iter()
-                .map(|&(sr, win_length, n_fft)| (sr, TrackManager::calc_window(win_length, n_fft))),
+                .map(|&(sr, win_length, n_fft)| (sr, calc_window(win_length, n_fft))),
         );
 
         if let FreqScale::Mel = self.setting.freq_scale {
@@ -205,7 +203,7 @@ impl TrackManager {
                 self.max_sec = sec;
                 self.id_max_sec = id;
             }
-            if let None = self.windows.get(&track.sr) {
+            if self.windows.get(&track.sr).is_none() {
                 new_sr_set.insert((track.sr, track.win_length, track.n_fft));
             }
             self.tracks.insert(id, track);
@@ -254,37 +252,38 @@ impl TrackManager {
 
         if force_update_ids.is_some() || changed {
             let force_update_ids = force_update_ids.unwrap();
-            let mut up_ratio = HashMap::<usize, f32>::with_capacity(if changed {
-                self.tracks.len()
-            } else {
-                force_update_ids.len()
-            });
-            up_ratio.par_extend(self.tracks.par_iter().filter_map(|(&id, track)| {
-                if changed || force_update_ids.contains(&id) {
-                    Some((
-                        id,
-                        calc_up_ratio(track.sr, self.max_sr, self.setting.freq_scale),
-                    ))
+            let up_ratio_map = {
+                let mut map = HashMap::<usize, f32>::with_capacity(if changed {
+                    self.tracks.len()
                 } else {
-                    None
-                }
-            }));
-            let new_spec_greys = par_collect_to_hashmap!(
-                self.specs.par_iter().filter_map(|(&(id, ch), spec)| {
-                    if changed || force_update_ids.contains(&id) {
-                        let grey = display::convert_spec_to_grey(
-                            spec.view(),
-                            *up_ratio.get(&id).unwrap(),
-                            self.max_db,
-                            self.min_db,
-                        );
-                        Some(((id, ch), grey))
+                    force_update_ids.len()
+                });
+                let iter = self.tracks.par_iter().filter_map(|(id, track)| {
+                    if changed || force_update_ids.contains(id) {
+                        let up_ratio =
+                            calc_up_ratio(track.sr, self.max_sr, self.setting.freq_scale);
+                        Some((*id, up_ratio))
                     } else {
                         None
                     }
-                }),
-                self.specs.len()
-            );
+                });
+                map.par_extend(iter);
+                map
+            };
+            let par_iter = self.specs.par_iter().filter_map(|(&(id, ch), spec)| {
+                if changed || force_update_ids.contains(&id) {
+                    let grey = display::convert_spec_to_grey(
+                        spec.view(),
+                        *up_ratio_map.get(&id).unwrap(),
+                        self.max_db,
+                        self.min_db,
+                    );
+                    Some(((id, ch), grey))
+                } else {
+                    None
+                }
+            });
+            let new_spec_greys = par_collect_to_hashmap!(par_iter, self.specs.len());
             if changed {
                 self.spec_greys = new_spec_greys;
             } else {
@@ -295,8 +294,8 @@ impl TrackManager {
     }
 
     pub fn remove_track(&mut self, id: usize) -> bool {
-        let removed_track = self.tracks.remove_entry(&id).unwrap().1;
-        for ch in (0..removed_track.n_ch).into_iter() {
+        let removed = self.tracks.remove_entry(&id).unwrap().1;
+        for ch in (0..removed.n_ch).into_iter() {
             self.specs.remove(&(id, ch));
             self.spec_greys.remove(&(id, ch));
         }
@@ -318,13 +317,9 @@ impl TrackManager {
             self.id_max_sec = id;
             self.max_sec = max_sec;
         }
-        if self
-            .tracks
-            .par_iter()
-            .all(|(_, track)| track.sr != removed_track.sr)
-        {
-            self.windows.remove(&removed_track.sr);
-            self.mel_fbs.remove(&removed_track.sr);
+        if self.tracks.par_iter().all(|(_, tr)| tr.sr != removed.sr) {
+            self.windows.remove(&removed.sr);
+            self.mel_fbs.remove(&removed.sr);
         }
         self.update_spec_greys(None)
     }
@@ -349,7 +344,7 @@ impl TrackManager {
         );
     }
 
-    pub fn calc_high_q_images(
+    pub fn get_entire_images(
         &self,
         id_ch_tuples: &[(usize, usize)],
         option: DrawOption,
@@ -363,12 +358,8 @@ impl TrackManager {
         result.par_extend(id_ch_tuples.par_iter().filter_map(|&(id, ch)| {
             let track = self.tracks.get(&id)?;
             let width = (px_per_sec * track.wavs.shape()[1] as f64 / track.sr as f64)
-                .max(1.)
-                .round();
-            if width > std::u32::MAX as f64 {
-                println!("width is too long");
-            }
-            let width = width as u32;
+                .max(MIN_WIDTH as f64)
+                .round() as u32;
             let mut arr = Array3::zeros((height as usize, width as usize, 4));
             display::draw_blended_spec_wav_to(
                 arr.as_slice_mut().unwrap(),
@@ -388,7 +379,7 @@ impl TrackManager {
         &self,
         id_ch: &(usize, usize),
         sec: f64,
-        width: u32,
+        target_width: u32,
         px_per_sec: f64,
         wavlen: usize,
         sr: u32,
@@ -397,14 +388,12 @@ impl TrackManager {
         let total_width = spec_grey.shape()[1] as u64;
         let wavlen = wavlen as f64;
         let sr = sr as u64;
-        let i_w_grey = ((total_width * sr) as f64 * sec / wavlen).round() as isize;
-        let width_grey = ((total_width * width as u64 * sr) as f64 / wavlen / px_per_sec)
-            .max(1.)
-            .round() as u32;
-        let (i_w_grey, width_grey) = calc_effective_w(i_w_grey, width_grey, total_width as u32)?;
-        let im = spec_grey
-            .slice(s![.., i_w_grey..i_w_grey + width_grey as usize])
-            .into_owned();
+        let i_w = ((total_width * sr) as f64 * sec / wavlen).round() as isize;
+        let width = ((total_width * target_width as u64 * sr) as f64 / wavlen / px_per_sec)
+            .max(MIN_WIDTH as f64)
+            .round() as usize;
+        let (i_w, width) = calc_effective_w(i_w, width, total_width as usize)?;
+        let im = spec_grey.slice(s![.., i_w..i_w + width]).into_owned();
         Some(im)
     }
 
@@ -417,18 +406,13 @@ impl TrackManager {
         px_per_sec: f64,
     ) -> Option<ArrayView1<f32>> {
         let track = self.tracks.get(&id).unwrap();
-        let i_sample = (sec * track.sr as f64).round() as isize;
-        let n_sample = ((track.sr as u64 * width as u64) as f64 / px_per_sec).round() as u32;
-        let (i_sample, n_sample) =
-            calc_effective_w(i_sample, n_sample, track.wavs.shape()[1] as u32)?;
-        Some(
-            track
-                .wavs
-                .slice(s![ch, i_sample..i_sample + n_sample as usize]),
-        )
+        let i = (sec * track.sr as f64).round() as isize;
+        let length = ((track.sr as u64 * width as u64) as f64 / px_per_sec).round() as usize;
+        let (i, length) = calc_effective_w(i, length, track.wavs.shape()[1])?;
+        Some(track.wavs.slice(s![ch, i..i + length]))
     }
 
-    pub fn draw_image_parts(
+    pub fn draw_image_parts_to(
         &self,
         outputs: &mut [u8],
         sec: f64,
@@ -441,9 +425,10 @@ impl TrackManager {
             height,
             blend,
         } = option;
+        let chunks = outputs.par_chunks_exact_mut((width * height * 4) as usize);
         self.get_all_id_ch()
             .par_iter()
-            .zip_eq(outputs.par_chunks_exact_mut((width * height * 4) as usize))
+            .zip_eq(chunks)
             .for_each(|(&(id, ch), output)| {
                 let (wavlen, sr) = {
                     let track = self.tracks.get(&id).unwrap();
@@ -466,7 +451,6 @@ impl TrackManager {
                     .round() as u32)
                     .min(width - pad_left);
 
-                // dbg!(pad_left, pad_right);
                 let drawing_width = width - pad_left - pad_right;
                 if drawing_width == 0 {
                     return;
@@ -493,36 +477,44 @@ impl TrackManager {
                     blend,
                     true,
                 );
-                let mut out_view =
-                    ArrayViewMut3::from_shape((height as usize, width as usize, 4), output)
-                        .unwrap();
+                let shape = (height as usize, width as usize, 4);
+                let mut out_view = ArrayViewMut3::from_shape(shape, output).unwrap();
                 drawing.indexed_iter().for_each(|((h, w, i), &x)| {
                     out_view[[h, w + pad_left as usize, i]] = x;
                 });
             });
     }
 
-    pub fn get_spec_image(&self, output: &mut [u8], id: usize, ch: usize, width: u32, height: u32) {
+    pub fn get_spec_image(&self, id: usize, ch: usize, width: u32, height: u32) -> Vec<u8> {
+        let mut result = vec![0u8; (width * height * 4) as usize];
         display::colorize_grey_with_size_to(
-            output,
+            result.as_mut_slice(),
             self.spec_greys.get(&(id, ch)).unwrap().view(),
             width,
             height,
             display::ResizeType::Lanczos3,
         );
+        result
     }
 
     pub fn get_wav_image(
         &self,
-        output: &mut [u8],
         id: usize,
         ch: usize,
         width: u32,
         height: u32,
         amp_range: (f32, f32),
-    ) {
-        let track = self.tracks.get(&id).unwrap();
-        display::draw_wav(output, track.get_wav(ch), width, height, 255, amp_range)
+    ) -> Vec<u8> {
+        let mut result = vec![0u8; (width * height * 4) as usize];
+        display::draw_wav(
+            result.as_mut_slice(),
+            self.tracks.get(&id).unwrap().get_wav(ch),
+            width,
+            height,
+            255,
+            amp_range,
+        );
+        result
     }
 
     pub fn get_frequency_hz(&self, id: usize, relative_freq: f32) -> f32 {
@@ -551,6 +543,14 @@ impl TrackManager {
     pub fn get_num_specs(&self) -> usize {
         self.specs.len()
     }
+}
+
+#[inline]
+fn calc_window<A>(win_length: usize, n_fft: usize) -> Array1<A>
+where
+    A: Float + Div + ScalarOperand,
+{
+    windows::hann::<A>(win_length, false) / A::from(n_fft).unwrap()
 }
 
 fn to_windowed_frames<A: Float>(
@@ -593,7 +593,7 @@ where
         assert_eq!(w.len(), win_length);
         w
     } else {
-        CowArray::from(windows::hann(win_length, false) / A::from(n_fft).unwrap())
+        CowArray::from(calc_window(win_length, n_fft))
     };
 
     let to_frames_wrapper =
@@ -606,19 +606,19 @@ where
     );
     let mut front_frames = to_frames_wrapper(front_wav.view());
 
-    let mut first_idx = front_frames.len() * hop_length - win_length / 2;
-    let mut frames: Vec<Array1<A>> = to_frames_wrapper(input.slice(s![first_idx..]));
+    let mut first_i = front_frames.len() * hop_length - win_length / 2;
+    let mut frames: Vec<Array1<A>> = to_frames_wrapper(input.slice(s![first_i..]));
 
-    first_idx += frames.len() * hop_length;
-    let back_wav_start_idx = first_idx.min(input.len() - win_length / 2 - 1);
+    first_i += frames.len() * hop_length;
+    let i_back_wav_start = first_i.min(input.len() - win_length / 2 - 1);
 
     let mut back_wav = pad(
-        input.slice(s![back_wav_start_idx..]),
+        input.slice(s![i_back_wav_start..]),
         (0, win_length / 2),
         Axis(0),
         PadMode::Reflect,
     );
-    back_wav.slice_collapse(s![(first_idx - back_wav_start_idx).max(0)..]);
+    back_wav.slice_collapse(s![(first_i - i_back_wav_start).max(0)..]);
     let mut back_frames = to_frames_wrapper(back_wav.view());
 
     let n_frames = front_frames.len() + frames.len() + back_frames.len();
@@ -628,13 +628,6 @@ where
         .map(|x| x.into_slice().unwrap())
         .collect();
 
-    let mut new_module;
-    let fft_module = if let Some(m) = fft_module {
-        m
-    } else {
-        new_module = RealFFT::<A>::new(n_fft).unwrap();
-        &mut new_module
-    };
     if parallel {
         let in_frames = front_frames
             .par_iter_mut()
@@ -646,6 +639,14 @@ where
             fft_module.process(x, y).unwrap();
         });
     } else {
+        let mut new_module;
+        let fft_module = match fft_module {
+            Some(m) => m,
+            None => {
+                new_module = RealFFT::<A>::new(n_fft).unwrap();
+                &mut new_module
+            }
+        };
         let in_frames = front_frames
             .iter_mut()
             .chain(frames.iter_mut())
@@ -673,17 +674,18 @@ fn calc_up_ratio(sr: u32, max_sr: u32, freq_scale: FreqScale) -> f32 {
     }
 }
 
-pub fn calc_effective_w(i_w: isize, width: u32, total_width: u32) -> Option<(usize, u32)> {
+pub fn calc_effective_w(i_w: isize, width: usize, total_width: usize) -> Option<(usize, usize)> {
     if i_w >= total_width as isize {
         None
     } else if i_w < 0 {
-        if width as isize + i_w <= 0 {
+        let i_right = width as isize + i_w;
+        if i_right <= 0 {
             None
         } else {
-            Some((0, (width + i_w as u32).min(total_width)))
+            Some((0, (i_right as usize).min(total_width)))
         }
     } else {
-        Some((i_w as usize, width.min(total_width - i_w as u32)))
+        Some((i_w as usize, width.min(total_width - i_w as usize)))
     }
 }
 
@@ -744,13 +746,11 @@ mod tests {
             .iter()
             .zip(sr_strings.iter())
             .for_each(|(&id, &sr)| {
-                let mut imvec = vec![0u8; (4 * width * height) as usize];
-                multitrack.get_spec_image(imvec.as_mut_slice(), id, 0, width, height);
+                let imvec = multitrack.get_spec_image(id, 0, width, height);
                 let im =
                     RgbaImage::from_vec(imvec.len() as u32 / height / 4, height, imvec).unwrap();
                 im.save(format!("../../samples/spec_{}.png", sr)).unwrap();
-                let mut imvec = vec![0u8; (4 * width * height) as usize];
-                multitrack.get_wav_image(imvec.as_mut_slice(), id, 0, width, height, (-1., 1.));
+                let imvec = multitrack.get_wav_image(id, 0, width, height, (-1., 1.));
                 let im =
                     RgbaImage::from_vec(imvec.len() as u32 / height / 4, height, imvec).unwrap();
                 im.save(format!("../../samples/wav_{}.png", sr)).unwrap();

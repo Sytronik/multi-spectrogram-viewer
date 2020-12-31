@@ -7,6 +7,10 @@ use tiny_skia::{Canvas, FillRule, LineCap, Paint, PathBuilder, PixmapMut, Rect, 
 
 pub type ResizeType = resize::Type;
 
+const BLACK: [u8; 4] = [0, 0, 0, 255];
+const WHITE: [u8; 4] = [255; 4];
+const MIN_TOP_BOTTOM_DIFF: f32 = 3.;
+const THR_RATIO_SHORT_HEIGHT: f32 = 2. / 3.;
 pub const COLORMAP: [[u8; 4]; 10] = [
     [0, 0, 4, 255],
     [27, 12, 65, 255],
@@ -21,7 +25,7 @@ pub const COLORMAP: [[u8; 4]; 10] = [
 ];
 pub const WAVECOLOR: [u8; 4] = [200, 21, 103, 255];
 
-#[inline(always)]
+#[inline]
 fn interpolate(rgba1: &[u8; 4], rgba2: &[u8; 4], ratio: f32) -> [u8; 4] {
     let mut result = [0u8; 4];
     rgba1
@@ -36,16 +40,19 @@ fn interpolate(rgba1: &[u8; 4], rgba2: &[u8; 4], ratio: f32) -> [u8; 4] {
 
 fn convert_grey_to_rgba(x: f32) -> [u8; 4] {
     if x < 0. {
-        return [0, 0, 0, 255];
+        return BLACK;
     }
-    let position = (COLORMAP.len() as f32) * x;
+    if x >= 1. {
+        return WHITE;
+    }
+    let position = x * COLORMAP.len() as f32;
     let index = position.floor() as usize;
-    if index >= COLORMAP.len() - 1 {
-        COLORMAP[COLORMAP.len() - 1]
+    let rgba1 = if index >= COLORMAP.len() - 1 {
+        &WHITE
     } else {
-        let ratio = position - index as f32;
-        interpolate(&COLORMAP[index + 1], &COLORMAP[index], ratio)
-    }
+        &COLORMAP[index + 1]
+    };
+    interpolate(rgba1, &COLORMAP[index], position - index as f32)
 }
 
 pub fn convert_spec_to_grey(
@@ -58,7 +65,7 @@ pub fn convert_spec_to_grey(
     let height = (spec.shape()[1] as f32 * up_ratio).round() as usize;
     let mut grey = Array2::<f32>::zeros((height, width));
     spec.indexed_iter().for_each(|((i, j), &x)| {
-        grey[[height - 1 - j, i]] = ((x - min) / (max - min)).max(0.).min(1.);
+        grey[[height - 1 - j, i]] = (x - min) / (max - min);
     });
     grey
 }
@@ -100,7 +107,7 @@ pub fn draw_blended_spec_wav_to(
         if blend < 0.5 {
             let rect = Rect::from_xywh(0., 0., width as f32, height as f32).unwrap();
             let mut paint = Paint::default();
-            paint.set_color_rgba8(0, 0, 0, (255. * (1. - 2. * blend)) as u8);
+            paint.set_color_rgba8(0, 0, 0, (255. * (1. - 2. * blend)).round() as u8);
             canvas.fill_rect(rect, &paint);
         }
         // println!("drawing blackbox: {:?}", start.elapsed());
@@ -112,7 +119,7 @@ pub fn draw_blended_spec_wav_to(
             wav,
             width,
             height,
-            (255. * (2. - 2. * blend).min(1.)) as u8,
+            (255. * (2. - 2. * blend).min(1.)).round() as u8,
             (-1., 1.),
         );
         // println!("drawing wav: {:?}", start.elapsed());
@@ -232,7 +239,7 @@ pub fn draw_wav(
     let mut bottom_envelope = Vec::<f32>::with_capacity(width as usize);
     let mut wav_avg = Vec::<f32>::with_capacity(width as usize);
     let mut n_short_height = 0u32;
-    for i_px in (0..width as i32).into_iter() {
+    for i_px in (0..width).into_iter() {
         let i_start = ((i_px as f32 - 0.5) * samples_per_px).round().max(0.) as usize;
         let i_end = (((i_px as f32 + 0.5) * samples_per_px).round() as usize).min(wav.len());
         let wav_slice = wav.slice(s![i_start..i_end]);
@@ -242,11 +249,11 @@ pub fn draw_wav(
         top_envelope.push(top);
         bottom_envelope.push(bottom);
         wav_avg.push(avg);
-        if bottom - top < 3. {
+        if bottom - top < MIN_TOP_BOTTOM_DIFF {
             n_short_height += 1;
         }
     }
-    if n_short_height < width * 2 / 3 {
+    if n_short_height < (width as f32 * THR_RATIO_SHORT_HEIGHT) as u32 {
         draw_wav_topbottom(&top_envelope[..], &bottom_envelope[..], &mut canvas, &paint);
     } else {
         draw_wav_directly(&wav_avg[..], &mut canvas, &paint);

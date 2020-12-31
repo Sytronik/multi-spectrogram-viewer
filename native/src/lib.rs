@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use lazy_static::{initialize, lazy_static};
@@ -7,6 +7,8 @@ use neon::prelude::*;
 use rayon::prelude::*;
 
 use thesia_backend::*;
+
+const MAX_IMAGE_SIZE: u32 = 8192;
 
 lazy_static! {
     static ref TM: RwLock<TrackManager> = RwLock::new(TrackManager::new());
@@ -121,12 +123,12 @@ fn remove_track(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 fn _crop_high_q_images<'a>(
     cx: &mut FunctionContext<'a>,
+    images: &RwLockReadGuard<IdChMap<Array3<u8>>>,
     sec: f64,
     width: u32,
     option: DrawOption,
 ) -> JsResult<'a, JsObject> {
     let obj = JsObject::new(cx);
-    let images = IMAGES.read().unwrap();
     let id_ch_tuples: IdChVec = images.keys().cloned().collect();
     let arr = JsArray::new(cx, images.len() as u32);
     for (i, (id, ch)) in id_ch_tuples.iter().enumerate() {
@@ -135,27 +137,28 @@ fn _crop_high_q_images<'a>(
     }
     let mut buf = JsArrayBuffer::new(cx, images.len() as u32 * width * option.height * 4)?;
     cx.borrow_mut(&mut buf, |borrowed| {
+        let chunk_iter = borrowed
+            .as_mut_slice()
+            .par_chunks_exact_mut((width * option.height * 4) as usize);
+
         id_ch_tuples
             .into_par_iter()
-            .zip(
-                borrowed
-                    .as_mut_slice()
-                    .par_chunks_exact_mut((width * option.height * 4) as usize),
-            )
+            .zip(chunk_iter)
             .for_each(|(id_ch, output)| {
                 let image = images.get(&id_ch).unwrap();
-                let total_w = image.len() / 4 / option.height as usize;
+                let total_width = image.len() / 4 / option.height as usize;
                 let i_w = (sec * option.px_per_sec) as isize;
-                let (i_w_eff, width_eff) = match calc_effective_w(i_w, width, total_w as u32) {
+                let (i_w_eff, width_eff) = match calc_effective_w(i_w, width as usize, total_width)
+                {
                     Some((i, w)) => (i as isize, w as isize),
                     None => return,
                 };
+                let slice = Slice::new(i_w_eff, Some(i_w_eff + width_eff), 1);
 
-                let mut out_view =
-                    ArrayViewMut3::from_shape((option.height as usize, width as usize, 4), output)
-                        .unwrap();
+                let shape = (option.height as usize, width as usize, 4);
+                let mut out_view = ArrayViewMut3::from_shape(shape, output).unwrap();
                 image
-                    .slice_axis(Axis(1), Slice::new(i_w_eff, Some(i_w_eff + width_eff), 1))
+                    .slice_axis(Axis(1), slice)
                     .indexed_iter()
                     .for_each(|((h, w, i), x)| {
                         out_view[[h, (w as isize - i_w.min(0)) as usize, i]] = *x;
@@ -184,7 +187,7 @@ fn _get_low_q_images<'a>(
     }
     let mut buf = JsArrayBuffer::new(cx, id_ch_tuples.len() as u32 * width * option.height * 4)?;
     cx.borrow_mut(&mut buf, |borrowed| {
-        tm.draw_image_parts(borrowed.as_mut_slice(), sec, width, option, fast_resize);
+        tm.draw_image_parts_to(borrowed.as_mut_slice(), sec, width, option, fast_resize);
     });
     obj.set(cx, "id_ch_arr", arr)?;
     obj.set(cx, "buf", buf)?;
@@ -209,11 +212,12 @@ fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
 
     // dbg!(sec, width, &option);
     let same_option = option == *DRAWOPTION.read().unwrap();
-    let too_large = option.px_per_sec * TM.read().unwrap().max_sec > 2f64.powi(13)
-        || option.height > 2i32.pow(13) as u32;
-    if IMAGES.try_read().is_ok() && same_option && !too_large {
+    let total_width = option.px_per_sec * TM.read().unwrap().max_sec;
+    let too_large = total_width > MAX_IMAGE_SIZE as f64 || option.height > MAX_IMAGE_SIZE;
+    if same_option && !too_large && IMAGES.try_read().is_ok() {
+        let images = IMAGES.read().unwrap();
         let start = Instant::now();
-        let obj = _crop_high_q_images(&mut cx, sec, width, option);
+        let obj = _crop_high_q_images(&mut cx, &images, sec, width, option);
         println!("Copy high q: {:?}", start.elapsed());
         obj
     } else {
@@ -253,10 +257,10 @@ impl Task for RenderingTask {
         if *DRAWOPTION.read().unwrap() == self.option {
             Ok(None)
         } else if let Ok(mut images) = IMAGES.try_write() {
-            let new = TM
-                .read()
-                .unwrap()
-                .calc_high_q_images(self.id_ch_tuples.as_slice(), self.option);
+            let new = {
+                let tm = TM.read().unwrap();
+                tm.get_entire_images(self.id_ch_tuples.as_slice(), self.option)
+            };
             let id_ch_tuples = new.keys().map(|&tup| tup).collect();
             // while (true) {}
             images.extend(new);
@@ -298,32 +302,32 @@ fn get_min_db(mut cx: FunctionContext) -> JsResult<JsNumber> {
 }
 
 fn get_n_ch(mut cx: FunctionContext) -> JsResult<JsNumber> {
-    let locked = TM.read().unwrap();
-    let track = get_track!(locked, cx, 0);
+    let tm = TM.read().unwrap();
+    let track = get_track!(tm, cx, 0);
     Ok(cx.number(track.n_ch as u32))
 }
 
 fn get_sec(mut cx: FunctionContext) -> JsResult<JsNumber> {
-    let locked = TM.read().unwrap();
-    let track = get_track!(locked, cx, 0);
+    let tm = TM.read().unwrap();
+    let track = get_track!(tm, cx, 0);
     Ok(cx.number(track.sec()))
 }
 
 fn get_sr(mut cx: FunctionContext) -> JsResult<JsNumber> {
-    let locked = TM.read().unwrap();
-    let track = get_track!(locked, cx, 0);
+    let tm = TM.read().unwrap();
+    let track = get_track!(tm, cx, 0);
     Ok(cx.number(track.sr))
 }
 
 fn get_path(mut cx: FunctionContext) -> JsResult<JsString> {
-    let locked = TM.read().unwrap();
-    let track = get_track!(locked, cx, 0);
+    let tm = TM.read().unwrap();
+    let track = get_track!(tm, cx, 0);
     Ok(cx.string(track.get_path()))
 }
 
 fn get_filename(mut cx: FunctionContext) -> JsResult<JsString> {
-    let locked = TM.read().unwrap();
-    let track = get_track!(locked, cx, 0);
+    let tm = TM.read().unwrap();
+    let track = get_track!(tm, cx, 0);
     Ok(cx.string(track.get_filename()))
 }
 
@@ -331,13 +335,9 @@ fn get_colormap(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
     let (c_iter, len) = get_colormap_iter_size();
     let mut buf = JsArrayBuffer::new(&mut cx, len as u32)?;
     cx.borrow_mut(&mut buf, |borrowed| {
-        borrowed
-            .as_mut_slice()
-            .iter_mut()
-            .zip(c_iter)
-            .for_each(|(x, &y)| {
-                *x = y;
-            })
+        for (x, &y) in borrowed.as_mut_slice().iter_mut().zip(c_iter) {
+            *x = y;
+        }
     });
     Ok(buf)
 }
