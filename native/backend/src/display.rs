@@ -9,8 +9,9 @@ pub type ResizeType = resize::Type;
 
 const BLACK: [u8; 4] = [0, 0, 0, 255];
 const WHITE: [u8; 4] = [255; 4];
-const MIN_TOP_BOTTOM_DIFF: f32 = 3.;
-const THR_RATIO_SHORT_HEIGHT: f32 = 2. / 3.;
+const THR_LONG_HEIGHT: f32 = 2.;
+const THR_N_CONSEQ_LONG_H: usize = 5;
+const WAV_STROKE_WIDTH: f32 = 1.75;
 pub const COLORMAP: [[u8; 4]; 10] = [
     [0, 0, 4, 255],
     [27, 12, 65, 255],
@@ -167,7 +168,7 @@ fn draw_wav_directly(wav_avg: &[f32], canvas: &mut Canvas, paint: &Paint) {
     };
 
     let mut stroke = Stroke::default();
-    stroke.width = 1.75;
+    stroke.width = WAV_STROKE_WIDTH;
     stroke.line_cap = LineCap::Round;
     canvas.stroke_path(&path, paint, &stroke);
 }
@@ -238,22 +239,30 @@ pub fn draw_wav(
     let mut top_envelope = Vec::<f32>::with_capacity(width as usize);
     let mut bottom_envelope = Vec::<f32>::with_capacity(width as usize);
     let mut wav_avg = Vec::<f32>::with_capacity(width as usize);
-    let mut n_short_height = 0u32;
+    let mut n_conseq_long_h = 0usize;
+    let mut max_n_conseq = 0usize;
     for i_px in (0..width).into_iter() {
         let i_start = ((i_px as f32 - 0.5) * samples_per_px).round().max(0.) as usize;
         let i_end = (((i_px as f32 + 0.5) * samples_per_px).round() as usize).min(wav.len());
         let wav_slice = wav.slice(s![i_start..i_end]);
-        let top = amp_to_height_px(*wav_slice.max().unwrap());
-        let bottom = amp_to_height_px(*wav_slice.min().unwrap());
+        let mut top = amp_to_height_px(*wav_slice.max().unwrap());
+        let mut bottom = amp_to_height_px(*wav_slice.min().unwrap());
         let avg = amp_to_height_px(wav_slice.mean().unwrap());
+        let diff = THR_LONG_HEIGHT + top - bottom;
+        if diff < 0. {
+            n_conseq_long_h += 1;
+        } else {
+            max_n_conseq = max_n_conseq.max(n_conseq_long_h);
+            n_conseq_long_h = 0;
+            top -= diff / 2.;
+            bottom += diff / 2.;
+        }
         top_envelope.push(top);
         bottom_envelope.push(bottom);
         wav_avg.push(avg);
-        if bottom - top < MIN_TOP_BOTTOM_DIFF {
-            n_short_height += 1;
-        }
     }
-    if n_short_height < (width as f32 * THR_RATIO_SHORT_HEIGHT) as u32 {
+    max_n_conseq = max_n_conseq.max(n_conseq_long_h);
+    if max_n_conseq > THR_N_CONSEQ_LONG_H {
         draw_wav_topbottom(&top_envelope[..], &bottom_envelope[..], &mut canvas, &paint);
     } else {
         draw_wav_directly(&wav_avg[..], &mut canvas, &paint);
