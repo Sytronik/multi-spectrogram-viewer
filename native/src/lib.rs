@@ -209,7 +209,8 @@ fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
 
     // dbg!(sec, width, &option);
     let same_option = option == *DRAWOPTION.read().unwrap();
-    let too_large = option.px_per_sec * TM.read().unwrap().max_sec > 2f64.powi(13);
+    let too_large = option.px_per_sec * TM.read().unwrap().max_sec > 2f64.powi(13)
+        || option.height > 2i32.pow(13) as u32;
     if IMAGES.try_read().is_ok() && same_option && !too_large {
         let start = Instant::now();
         let obj = _crop_high_q_images(&mut cx, sec, width, option);
