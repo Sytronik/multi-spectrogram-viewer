@@ -145,7 +145,7 @@ fn _crop_high_q_images<'a>(
             .for_each(|(id_ch, output)| {
                 let image = images.get(&id_ch).unwrap();
                 let total_w = image.len() / 4 / option.height as usize;
-                let i_w = (sec * total_w as f64 / option.px_per_sec) as isize;
+                let i_w = (sec * option.px_per_sec) as isize;
                 let (i_w_eff, width_eff) = match calc_effective_w(i_w, width, total_w as u32) {
                     Some((i, w)) => (i as isize, w as isize),
                     None => return,

@@ -424,10 +424,8 @@ impl TrackManager {
         px_per_sec: f64,
     ) -> Option<ArrayView1<f32>> {
         let track = self.tracks.get(&id).unwrap();
-        let i_sample = (sec * track.sr as f64).max(0.).round() as isize;
-        let n_sample = ((track.sr as u64 * width as u64) as f64 / px_per_sec)
-            .max(1.)
-            .round() as u32;
+        let i_sample = (sec * track.sr as f64).round() as isize;
+        let n_sample = ((track.sr as u64 * width as u64) as f64 / px_per_sec).round() as u32;
         let (i_sample, n_sample) =
             calc_effective_w(i_sample, n_sample, track.wavs.shape()[1] as u32)?;
         Some(
