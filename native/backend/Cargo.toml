@@ -7,11 +7,12 @@ version = "0.0.0"
 [lib]
 name = "thesia_backend"
 
+[dev-dependencies]
+image = "0.23.12"
+
 [dependencies]
 approx = {version = "0.4.0", features = ["num-complex"]}
 hound = "3.4.0"
-image = "0.23.12"
-imageproc = "0.22.0"
 ndarray = {version = "0.14.0", features = ["rayon", "approx"]}
 num-traits = "0.2.14"
 rayon = "1.5.0"

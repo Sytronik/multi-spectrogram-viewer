@@ -1,32 +1,42 @@
 // use std::time::Instant;
 
-use image::{ImageBuffer, Luma, Rgba};
-use imageproc::pixelops::interpolate;
 use ndarray::prelude::*;
 use ndarray_stats::QuantileExt;
 use resize::{self, Pixel::GrayF32};
 use tiny_skia::{Canvas, FillRule, LineCap, Paint, PathBuilder, PixmapMut, Rect, Stroke};
 
-pub type GreyF32Image = ImageBuffer<Luma<f32>, Vec<f32>>;
 pub type ResizeType = resize::Type;
 
-pub const COLORMAP: [Rgba<u8>; 10] = [
-    Rgba([0, 0, 4, 255]),
-    Rgba([27, 12, 65, 255]),
-    Rgba([74, 12, 107, 255]),
-    Rgba([120, 28, 109, 255]),
-    Rgba([165, 44, 96, 255]),
-    Rgba([207, 68, 70, 255]),
-    Rgba([237, 105, 37, 255]),
-    Rgba([251, 155, 6, 255]),
-    Rgba([247, 209, 61, 255]),
-    Rgba([252, 255, 164, 255]),
+pub const COLORMAP: [[u8; 4]; 10] = [
+    [0, 0, 4, 255],
+    [27, 12, 65, 255],
+    [74, 12, 107, 255],
+    [120, 28, 109, 255],
+    [165, 44, 96, 255],
+    [207, 68, 70, 255],
+    [237, 105, 37, 255],
+    [251, 155, 6, 255],
+    [247, 209, 61, 255],
+    [252, 255, 164, 255],
 ];
 pub const WAVECOLOR: [u8; 4] = [200, 21, 103, 255];
 
-fn convert_grey_to_rgba(x: f32) -> Rgba<u8> {
+#[inline(always)]
+fn interpolate(rgba1: &[u8; 4], rgba2: &[u8; 4], ratio: f32) -> [u8; 4] {
+    let mut result = [0u8; 4];
+    rgba1
+        .iter()
+        .zip(rgba2.iter())
+        .zip(result.iter_mut())
+        .for_each(|((&a, &b), x)| {
+            *x = (ratio * a as f32 + (1. - ratio) * b as f32).round() as u8;
+        });
+    result
+}
+
+fn convert_grey_to_rgba(x: f32) -> [u8; 4] {
     if x < 0. {
-        return Rgba([0, 0, 0, 255]);
+        return [0, 0, 0, 255];
     }
     let position = (COLORMAP.len() as f32) * x;
     let index = position.floor() as usize;
@@ -34,7 +44,7 @@ fn convert_grey_to_rgba(x: f32) -> Rgba<u8> {
         COLORMAP[COLORMAP.len() - 1]
     } else {
         let ratio = position - index as f32;
-        interpolate(COLORMAP[index + 1], COLORMAP[index], ratio)
+        interpolate(&COLORMAP[index + 1], &COLORMAP[index], ratio)
     }
 }
 
@@ -43,21 +53,19 @@ pub fn convert_spec_to_grey(
     up_ratio: f32,
     max: f32,
     min: f32,
-) -> GreyF32Image {
-    let height = (spec.shape()[1] as f32 * up_ratio).round() as u32;
-    GreyF32Image::from_fn(spec.shape()[0] as u32, height, |x, y| {
-        if y >= height - spec.shape()[1] as u32 {
-            let db = spec[[x as usize, (height - 1 - y) as usize]];
-            Luma([((db - min) / (max - min)).max(0.).min(1.)])
-        } else {
-            Luma([0.])
-        }
-    })
+) -> Array2<f32> {
+    let width = spec.shape()[0];
+    let height = (spec.shape()[1] as f32 * up_ratio).round() as usize;
+    let mut grey = Array2::<f32>::zeros((height, width));
+    spec.indexed_iter().for_each(|((i, j), &x)| {
+        grey[[height - 1 - j, i]] = ((x - min) / (max - min)).max(0.).min(1.);
+    });
+    grey
 }
 
 pub fn draw_blended_spec_wav_to(
     output: &mut [u8],
-    spec_grey: &GreyF32Image,
+    spec_grey: ArrayView2<f32>,
     wav: ArrayView1<f32>,
     width: u32,
     height: u32,
@@ -113,30 +121,27 @@ pub fn draw_blended_spec_wav_to(
 
 pub fn colorize_grey_with_size_to(
     output: &mut [u8],
-    grey: &GreyF32Image,
+    grey: ArrayView2<f32>,
     width: u32,
     height: u32,
     resizetype: ResizeType,
 ) {
     let mut resizer = resize::new(
-        grey.width() as usize,
-        grey.height() as usize,
+        grey.shape()[1] as usize,
+        grey.shape()[0] as usize,
         width as usize,
         height as usize,
         GrayF32,
         resizetype,
     );
     let mut resized = vec![0f32; (width * height) as usize];
-    resizer.resize(grey.as_raw(), &mut resized);
+    resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
     resized
         .into_iter()
         .zip(output.chunks_exact_mut(4))
         .for_each(|(x, y)| {
-            let [r, g, b, a] = convert_grey_to_rgba(x).0;
-            y[0] = r;
-            y[1] = g;
-            y[2] = b;
-            y[3] = a;
+            let x = convert_grey_to_rgba(x);
+            y.clone_from_slice(&x[..]);
         });
 }
 
@@ -258,7 +263,7 @@ mod tests {
     #[test]
     fn show_colorbar() {
         let (width, height) = (50, 500);
-        let colormap: Vec<u8> = COLORMAP.iter().rev().flat_map(|&p| p.0.to_vec()).collect();
+        let colormap: Vec<u8> = COLORMAP.iter().rev().flatten().cloned().collect();
         let mut imvec = vec![0u8; width * height * 4];
         let mut resizer = resize::new(1, 10, width, height, RGBA, ResizeType::Triangle);
         resizer.resize(&colormap, &mut imvec);

@@ -5,7 +5,6 @@ use std::ops::*;
 use std::path::PathBuf;
 
 use approx::abs_diff_ne;
-use image::SubImage;
 use ndarray::{prelude::*, ScalarOperand};
 use ndarray_stats::QuantileExt;
 use rayon::prelude::*;
@@ -19,7 +18,6 @@ pub mod realfft;
 pub mod utils;
 pub mod windows;
 use decibel::DeciBelInplace;
-use display::GreyF32Image;
 use realfft::RealFFT;
 use utils::{calc_proper_n_fft, pad, PadMode};
 
@@ -113,7 +111,7 @@ pub struct TrackManager {
     windows: SrMap<Array1<f32>>,
     mel_fbs: SrMap<Array2<f32>>,
     specs: IdChMap<Array2<f32>>,
-    spec_greys: IdChMap<GreyF32Image>,
+    spec_greys: IdChMap<Array2<f32>>,
     pub max_db: f32,
     pub min_db: f32,
     pub max_sec: f64,
@@ -342,7 +340,7 @@ impl TrackManager {
     ) {
         display::draw_blended_spec_wav_to(
             output,
-            self.spec_greys.get(&(id, ch)).unwrap(),
+            self.spec_greys.get(&(id, ch)).unwrap().view(),
             self.tracks.get(&id).unwrap().get_wav(ch),
             width,
             height,
@@ -374,7 +372,7 @@ impl TrackManager {
             let mut arr = Array3::zeros((height as usize, width as usize, 4));
             display::draw_blended_spec_wav_to(
                 arr.as_slice_mut().unwrap(),
-                self.spec_greys.get(&(id, ch)).unwrap(),
+                self.spec_greys.get(&(id, ch)).unwrap().view(),
                 track.get_wav(ch),
                 width,
                 height,
@@ -386,7 +384,7 @@ impl TrackManager {
         result
     }
 
-    fn get_grey_sub(
+    fn crop_grey(
         &self,
         id_ch: &(usize, usize),
         sec: f64,
@@ -394,24 +392,19 @@ impl TrackManager {
         px_per_sec: f64,
         wavlen: usize,
         sr: u32,
-    ) -> Option<GreyF32Image> {
+    ) -> Option<Array2<f32>> {
         let spec_grey = self.spec_greys.get(id_ch).unwrap();
-        let i_w_grey =
-            ((spec_grey.width() as u64 * sr as u64) as f64 * sec / wavlen as f64).round() as isize;
-        let width_grey = ((spec_grey.width() as u64 * width as u64 * sr as u64) as f64
-            / wavlen as f64
-            / px_per_sec as f64)
+        let total_width = spec_grey.shape()[1] as u64;
+        let wavlen = wavlen as f64;
+        let sr = sr as u64;
+        let i_w_grey = ((total_width * sr) as f64 * sec / wavlen).round() as isize;
+        let width_grey = ((total_width * width as u64 * sr) as f64 / wavlen / px_per_sec)
             .max(1.)
             .round() as u32;
-        let (i_w_grey, width_grey) = calc_effective_w(i_w_grey, width_grey, spec_grey.width())?;
-        let im = SubImage::new(
-            spec_grey,
-            i_w_grey as u32,
-            0,
-            width_grey,
-            spec_grey.height(),
-        )
-        .to_image();
+        let (i_w_grey, width_grey) = calc_effective_w(i_w_grey, width_grey, total_width as u32)?;
+        let im = spec_grey
+            .slice(s![.., i_w_grey..i_w_grey + width_grey as usize])
+            .into_owned();
         Some(im)
     }
 
@@ -457,11 +450,10 @@ impl TrackManager {
                     (track.wavs.shape()[1], track.sr)
                 };
 
-                let grey_sub =
-                    match self.get_grey_sub(&(id, ch), sec, width, px_per_sec, wavlen, sr) {
-                        Some(x) => x,
-                        None => return,
-                    };
+                let grey_sub = match self.crop_grey(&(id, ch), sec, width, px_per_sec, wavlen, sr) {
+                    Some(x) => x,
+                    None => return,
+                };
                 let wav_slice = match self.get_wav_slice(id, ch, sec, width, px_per_sec) {
                     Some(x) => x,
                     None => return,
@@ -482,7 +474,7 @@ impl TrackManager {
                 if drawing_width == width {
                     display::draw_blended_spec_wav_to(
                         output,
-                        &grey_sub,
+                        grey_sub.view(),
                         wav_slice,
                         width,
                         height,
@@ -494,7 +486,7 @@ impl TrackManager {
                 let mut drawing = Array3::zeros((height as usize, drawing_width as usize, 4));
                 display::draw_blended_spec_wav_to(
                     drawing.as_slice_mut().unwrap(),
-                    &grey_sub,
+                    grey_sub.view(),
                     wav_slice,
                     drawing_width,
                     height,
@@ -513,7 +505,7 @@ impl TrackManager {
     pub fn get_spec_image(&self, output: &mut [u8], id: usize, ch: usize, width: u32, height: u32) {
         display::colorize_grey_with_size_to(
             output,
-            self.spec_greys.get(&(id, ch)).unwrap(),
+            self.spec_greys.get(&(id, ch)).unwrap().view(),
             width,
             height,
             display::ResizeType::Lanczos3,
@@ -669,8 +661,8 @@ where
 
 pub fn get_colormap_iter_size() -> (impl Iterator<Item = &'static u8>, usize) {
     (
-        display::COLORMAP.iter().flat_map(|x| x.0.iter()),
-        display::COLORMAP.len() * display::COLORMAP[0].0.len(),
+        display::COLORMAP.iter().flatten(),
+        display::COLORMAP.len() * display::COLORMAP[0].len(),
     )
 }
 
