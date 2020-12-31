@@ -135,6 +135,49 @@ pub fn colorize_grey_with_size(
         });
 }
 
+fn draw_wav_directly(wav_avg: &[f32], canvas: &mut Canvas, paint: &Paint) {
+    // println!("avg rendering. short height ratio: {}", n_short_height as f32 / width as f32);
+    let path = {
+        let mut pb = PathBuilder::new();
+        pb.move_to(0., wav_avg[0]);
+        for (x, &y) in wav_avg.iter().enumerate().skip(1) {
+            pb.line_to(x as f32, y);
+        }
+        if wav_avg.len() == 1 {
+            pb.line_to(0., wav_avg[0]);
+        }
+        pb.finish().unwrap()
+    };
+
+    let mut stroke = Stroke::default();
+    stroke.width = 1.75;
+    stroke.line_cap = LineCap::Round;
+    canvas.stroke_path(&path, paint, &stroke);
+}
+
+fn draw_wav_topbottom(
+    top_envelope: &[f32],
+    bottom_envelope: &[f32],
+    canvas: &mut Canvas,
+    paint: &Paint,
+) {
+    // println!("top-bottom rendering. short height ratio: {}", n_short_height as f32 / width as f32);
+    let path = {
+        let mut pb = PathBuilder::new();
+        pb.move_to(0., top_envelope[0]);
+        for (x, &y) in top_envelope.iter().enumerate().skip(1) {
+            pb.line_to(x as f32, y);
+        }
+        for (x, &y) in bottom_envelope.iter().enumerate().rev() {
+            pb.line_to(x as f32, y);
+        }
+        pb.close();
+        pb.finish().unwrap()
+    };
+
+    canvas.fill_path(&path, paint, FillRule::Winding);
+}
+
 pub fn draw_wav(
     output: &mut [u8],
     wav: ArrayView1<f32>,
@@ -143,37 +186,6 @@ pub fn draw_wav(
     alpha: u8,
     amp_range: (f32, f32),
 ) {
-    let amp_to_height_px =
-        |x: f32| ((amp_range.1 - x) * height as f32 / (amp_range.1 - amp_range.0));
-    let mut samples_per_px = wav.len() as f32 / width as f32;
-    let wav = if samples_per_px >= 2. {
-        CowArray::from(wav)
-    } else {
-        let new_len = (wav.len() as f32 / samples_per_px).round() as usize;
-        let mut new_wav = CowArray::from(Array1::<f32>::zeros(new_len));
-        let mut resizer = resize::new(wav.len(), 1, new_len, 1, GrayF32, ResizeType::Triangle);
-        resizer.resize(wav.as_slice().unwrap(), new_wav.as_slice_mut().unwrap());
-        samples_per_px = new_len as f32 / width as f32;
-        new_wav
-    };
-    let mut max_envelope = Vec::<f32>::with_capacity(width as usize);
-    let mut min_envelope = Vec::<f32>::with_capacity(width as usize);
-    let mut avg_envelope = Vec::<f32>::with_capacity(width as usize);
-    let mut n_short_height = 0u32;
-    for i_px in (0..width as i32).into_iter() {
-        let i_start = ((i_px as f32 - 0.5) * samples_per_px).round().max(0.) as usize;
-        let i_end = (((i_px as f32 + 0.5) * samples_per_px).round() as usize).min(wav.len());
-        let wav_slice = wav.slice(s![i_start..i_end]);
-        let max = *wav_slice.max().unwrap();
-        let min = *wav_slice.min().unwrap();
-        let avg = wav_slice.mean().unwrap();
-        max_envelope.push(max);
-        min_envelope.push(min);
-        avg_envelope.push(avg);
-        if amp_to_height_px(min) - amp_to_height_px(max) < 3. {
-            n_short_height += 1;
-        }
-    }
     let pixmap = PixmapMut::from_bytes(output, width, height).unwrap();
     let mut canvas = Canvas::from(pixmap);
 
@@ -181,37 +193,53 @@ pub fn draw_wav(
     let [r, g, b, _] = WAVECOLOR;
     paint.set_color_rgba8(r, g, b, alpha);
     paint.anti_alias = true;
-    if width == 1 || n_short_height < width * 2 / 3 {
-        // println!("min-max rendering. short height ratio: {}", n_short_height as f32 / width as f32);
-        let path = {
-            let mut pb = PathBuilder::new();
-            pb.move_to(0., amp_to_height_px(max_envelope[0]));
-            for (x, &y) in max_envelope.iter().enumerate().skip(1) {
-                pb.line_to(x as f32, amp_to_height_px(y));
-            }
-            for (x, &y) in min_envelope.iter().enumerate().rev() {
-                pb.line_to(x as f32, amp_to_height_px(y));
-            }
-            pb.close();
-            pb.finish().unwrap()
-        };
 
-        canvas.fill_path(&path, &paint, FillRule::Winding);
+    let amp_to_height_px = |x: f32| {
+        ((amp_range.1 - x) * height as f32 / (amp_range.1 - amp_range.0))
+            .max(0.)
+            .min(height as f32)
+    };
+    let samples_per_px = wav.len() as f32 / width as f32;
+
+    // need upsampling
+    if samples_per_px < 2. {
+        let mut upsampled = Array1::<f32>::zeros(width as usize);
+        // naive upsampling
+        let mut resizer = resize::new(
+            wav.len(),
+            1,
+            width as usize,
+            1,
+            GrayF32,
+            ResizeType::Triangle,
+        );
+        resizer.resize(wav.as_slice().unwrap(), upsampled.as_slice_mut().unwrap());
+        upsampled.mapv_inplace(amp_to_height_px);
+        draw_wav_directly(upsampled.as_slice().unwrap(), &mut canvas, &paint);
+        return;
+    }
+    let mut top_envelope = Vec::<f32>::with_capacity(width as usize);
+    let mut bottom_envelope = Vec::<f32>::with_capacity(width as usize);
+    let mut wav_avg = Vec::<f32>::with_capacity(width as usize);
+    let mut n_short_height = 0u32;
+    for i_px in (0..width as i32).into_iter() {
+        let i_start = ((i_px as f32 - 0.5) * samples_per_px).round().max(0.) as usize;
+        let i_end = (((i_px as f32 + 0.5) * samples_per_px).round() as usize).min(wav.len());
+        let wav_slice = wav.slice(s![i_start..i_end]);
+        let top = amp_to_height_px(*wav_slice.max().unwrap());
+        let bottom = amp_to_height_px(*wav_slice.min().unwrap());
+        let avg = amp_to_height_px(wav_slice.mean().unwrap());
+        top_envelope.push(top);
+        bottom_envelope.push(bottom);
+        wav_avg.push(avg);
+        if bottom - top < 3. {
+            n_short_height += 1;
+        }
+    }
+    if n_short_height < width * 2 / 3 {
+        draw_wav_topbottom(&top_envelope[..], &bottom_envelope[..], &mut canvas, &paint);
     } else {
-        // println!("avg rendering. short height ratio: {}", n_short_height as f32 / width as f32);
-        let path = {
-            let mut pb = PathBuilder::new();
-            pb.move_to(0., amp_to_height_px(avg_envelope[0]));
-            for (x, &y) in avg_envelope.iter().enumerate().skip(1) {
-                pb.line_to(x as f32, amp_to_height_px(y));
-            }
-            pb.finish().unwrap()
-        };
-
-        let mut stroke = Stroke::default();
-        stroke.width = 1.75;
-        stroke.line_cap = LineCap::Round;
-        canvas.stroke_path(&path, &paint, &stroke);
+        draw_wav_directly(&wav_avg[..], &mut canvas, &paint);
     }
 }
 
