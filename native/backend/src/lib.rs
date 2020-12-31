@@ -116,7 +116,7 @@ pub struct TrackManager {
     spec_greys: IdChMap<GreyF32Image>,
     pub max_db: f32,
     pub min_db: f32,
-    max_sec: f64,
+    pub max_sec: f64,
     id_max_sec: usize,
     pub max_sr: u32,
 }
@@ -274,7 +274,7 @@ impl TrackManager {
             let new_spec_greys = par_collect_to_hashmap!(
                 self.specs.par_iter().filter_map(|(&(id, ch), spec)| {
                     if changed || force_update_ids.contains(&id) {
-                        let grey = display::spec_to_grey(
+                        let grey = display::convert_spec_to_grey(
                             spec.view(),
                             *up_ratio.get(&id).unwrap(),
                             self.max_db,
@@ -340,7 +340,7 @@ impl TrackManager {
         height: u32,
         blend: f64,
     ) {
-        display::blend_spec_wav(
+        display::draw_blended_spec_wav_to(
             output,
             self.spec_greys.get(&(id, ch)).unwrap(),
             self.tracks.get(&id).unwrap().get_wav(ch),
@@ -372,7 +372,7 @@ impl TrackManager {
             }
             let width = width as u32;
             let mut arr = Array3::zeros((height as usize, width as usize, 4));
-            display::blend_spec_wav(
+            display::draw_blended_spec_wav_to(
                 arr.as_slice_mut().unwrap(),
                 self.spec_greys.get(&(id, ch)).unwrap(),
                 track.get_wav(ch),
@@ -435,12 +435,13 @@ impl TrackManager {
         )
     }
 
-    pub fn calc_low_q_images_to(
+    pub fn draw_image_parts(
         &self,
         outputs: &mut [u8],
         sec: f64,
         width: u32,
         option: DrawOption,
+        fast_resize: bool,
     ) {
         let DrawOption {
             px_per_sec,
@@ -473,18 +474,25 @@ impl TrackManager {
                     .round() as u32)
                     .min(width - pad_left);
 
+                // dbg!(pad_left, pad_right);
                 let drawing_width = width - pad_left - pad_right;
                 if drawing_width == 0 {
                     return;
                 }
                 if drawing_width == width {
-                    display::blend_spec_wav(
-                        output, &grey_sub, wav_slice, width, height, blend, true,
+                    display::draw_blended_spec_wav_to(
+                        output,
+                        &grey_sub,
+                        wav_slice,
+                        width,
+                        height,
+                        blend,
+                        fast_resize,
                     );
                     return;
                 }
                 let mut drawing = Array3::zeros((height as usize, drawing_width as usize, 4));
-                display::blend_spec_wav(
+                display::draw_blended_spec_wav_to(
                     drawing.as_slice_mut().unwrap(),
                     &grey_sub,
                     wav_slice,
@@ -503,7 +511,7 @@ impl TrackManager {
     }
 
     pub fn get_spec_image(&self, output: &mut [u8], id: usize, ch: usize, width: u32, height: u32) {
-        display::colorize_grey_with_size(
+        display::colorize_grey_with_size_to(
             output,
             self.spec_greys.get(&(id, ch)).unwrap(),
             width,

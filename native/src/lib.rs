@@ -172,16 +172,9 @@ fn _get_low_q_images<'a>(
     sec: f64,
     width: u32,
     option: DrawOption,
-    callback: Handle<JsFunction>,
+    fast_resize: bool,
 ) -> JsResult<'a, JsObject> {
     let obj = JsObject::new(cx);
-    if option != *DRAWOPTION.read().unwrap() {
-        RenderingTask {
-            id_ch_tuples: TM.read().unwrap().get_all_id_ch(),
-            option: option,
-        }
-        .schedule(callback);
-    }
     let tm = TM.read().unwrap();
     let id_ch_tuples = tm.get_all_id_ch();
     let arr = JsArray::new(cx, id_ch_tuples.len() as u32);
@@ -191,7 +184,7 @@ fn _get_low_q_images<'a>(
     }
     let mut buf = JsArrayBuffer::new(cx, id_ch_tuples.len() as u32 * width * option.height * 4)?;
     cx.borrow_mut(&mut buf, |borrowed| {
-        tm.calc_low_q_images_to(borrowed.as_mut_slice(), sec, width, option);
+        tm.draw_image_parts(borrowed.as_mut_slice(), sec, width, option, fast_resize);
     });
     obj.set(cx, "id_ch_arr", arr)?;
     obj.set(cx, "buf", buf)?;
@@ -215,16 +208,27 @@ fn get_images(mut cx: FunctionContext) -> JsResult<JsObject> {
     let callback = cx.argument::<JsFunction>(3)?;
 
     // dbg!(sec, width, &option);
-
-    if IMAGES.try_read().is_ok() && option == *DRAWOPTION.read().unwrap() {
+    let same_option = option == *DRAWOPTION.read().unwrap();
+    let too_large = option.px_per_sec * TM.read().unwrap().max_sec > 2f64.powi(13);
+    if IMAGES.try_read().is_ok() && same_option && !too_large {
         let start = Instant::now();
         let obj = _crop_high_q_images(&mut cx, sec, width, option);
         println!("Copy high q: {:?}", start.elapsed());
         obj
     } else {
         let start = Instant::now();
-        let obj = _get_low_q_images(&mut cx, sec, width, option, callback);
-        println!("Draw low q: {:?}", start.elapsed());
+        if !same_option && !too_large {
+            RenderingTask {
+                id_ch_tuples: TM.read().unwrap().get_all_id_ch(),
+                option,
+            }
+            .schedule(callback);
+        }
+        let obj = _get_low_q_images(&mut cx, sec, width, option, !too_large);
+        {
+            let high_or_low = if too_large { "high" } else { "low" };
+            println!("Draw {} q: {:?}", high_or_low, start.elapsed());
+        }
         obj
     }
 }

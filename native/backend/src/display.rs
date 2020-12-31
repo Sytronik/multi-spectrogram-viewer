@@ -24,7 +24,7 @@ pub const COLORMAP: [Rgba<u8>; 10] = [
 ];
 pub const WAVECOLOR: [u8; 4] = [200, 21, 103, 255];
 
-fn convert_grey_to_color(x: f32) -> Rgba<u8> {
+fn convert_grey_to_rgba(x: f32) -> Rgba<u8> {
     if x < 0. {
         return Rgba([0, 0, 0, 255]);
     }
@@ -38,7 +38,12 @@ fn convert_grey_to_color(x: f32) -> Rgba<u8> {
     }
 }
 
-pub fn spec_to_grey(spec: ArrayView2<f32>, up_ratio: f32, max: f32, min: f32) -> GreyF32Image {
+pub fn convert_spec_to_grey(
+    spec: ArrayView2<f32>,
+    up_ratio: f32,
+    max: f32,
+    min: f32,
+) -> GreyF32Image {
     let height = (spec.shape()[1] as f32 * up_ratio).round() as u32;
     GreyF32Image::from_fn(spec.shape()[0] as u32, height, |x, y| {
         if y >= height - spec.shape()[1] as u32 {
@@ -50,7 +55,7 @@ pub fn spec_to_grey(spec: ArrayView2<f32>, up_ratio: f32, max: f32, min: f32) ->
     })
 }
 
-pub fn blend_spec_wav(
+pub fn draw_blended_spec_wav_to(
     output: &mut [u8],
     spec_grey: &GreyF32Image,
     wav: ArrayView1<f32>,
@@ -70,7 +75,7 @@ pub fn blend_spec_wav(
         } else {
             ResizeType::Lanczos3
         };
-        colorize_grey_with_size(
+        colorize_grey_with_size_to(
             canvas.pixmap().data_mut(),
             spec_grey,
             width,
@@ -106,7 +111,7 @@ pub fn blend_spec_wav(
     }
 }
 
-pub fn colorize_grey_with_size(
+pub fn colorize_grey_with_size_to(
     output: &mut [u8],
     grey: &GreyF32Image,
     width: u32,
@@ -127,7 +132,7 @@ pub fn colorize_grey_with_size(
         .into_iter()
         .zip(output.chunks_exact_mut(4))
         .for_each(|(x, y)| {
-            let [r, g, b, a] = convert_grey_to_color(x).0;
+            let [r, g, b, a] = convert_grey_to_rgba(x).0;
             y[0] = r;
             y[1] = g;
             y[2] = b;
