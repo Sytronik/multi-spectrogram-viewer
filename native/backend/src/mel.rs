@@ -11,7 +11,7 @@ const LOGSTEP: f64 = 0.06875177742094912; // 6.4.ln() / 27.
 const LINEARSCALE: f64 = 200. / 3.;
 
 #[inline]
-pub fn mel_to_hz<A: Float>(mel: A) -> A {
+pub fn to_hz<A: Float>(mel: A) -> A {
     let min_log_mel = A::from(MIN_LOG_MEL).unwrap();
     if mel < min_log_mel {
         A::from(LINEARSCALE).unwrap() * mel
@@ -21,7 +21,7 @@ pub fn mel_to_hz<A: Float>(mel: A) -> A {
 }
 
 #[inline]
-pub fn hz_to_mel<A: Float>(freq: A) -> A {
+pub fn from_hz<A: Float>(freq: A) -> A {
     let min_log_hz = A::from(MIN_LOG_HZ).unwrap();
     if freq < min_log_hz {
         freq / A::from(LINEARSCALE).unwrap()
@@ -55,12 +55,12 @@ where
     let fmax = if let Some(f) = fmax { f } else { f_nyquist };
     let n_freq = n_fft / 2 + 1;
 
-    let min_mel = hz_to_mel(fmin);
-    let max_mel = hz_to_mel(fmax);
+    let min_mel = from_hz(fmin);
+    let max_mel = from_hz(fmax);
 
     let linear_freqs = Array::linspace(A::zero(), f_nyquist, n_freq);
     let mut mel_freqs = Array::linspace(min_mel, max_mel, n_mel + 2);
-    mel_freqs.par_mapv_inplace(mel_to_hz);
+    mel_freqs.par_mapv_inplace(to_hz);
 
     let mut weights = Array2::<A>::zeros((n_freq, n_mel));
     Zip::indexed(weights.axis_iter_mut(Axis(1))).par_apply(|i_m, mut w| {
@@ -86,7 +86,7 @@ where
 
 pub fn calc_mel_fb_default(sr: u32, n_fft: usize) -> Array2<f32> {
     let mut n_mel =
-        (2. * hz_to_mel(sr as f32 / 2.) / hz_to_mel(sr as f32 / n_fft as f32) - 1.) as usize;
+        (2. * from_hz(sr as f32 / 2.) / from_hz(sr as f32 / n_fft as f32) - 1.) as usize;
     n_mel = n_mel.min(n_fft / 2 + 1);
 
     loop {
@@ -106,10 +106,10 @@ mod tests {
 
     #[test]
     fn mel_hz_convert() {
-        assert_abs_diff_eq!(hz_to_mel(100.), 1.5, epsilon = 1e-14);
-        assert_abs_diff_eq!(hz_to_mel(1100.), 16.38629404765444, epsilon = 1e-14);
-        assert_abs_diff_eq!(mel_to_hz(1.), 66.66666666666667, epsilon = 1e-14);
-        assert_abs_diff_eq!(mel_to_hz(16.), 1071.1702874944676, epsilon = 1e-14);
+        assert_abs_diff_eq!(from_hz(100.), 1.5, epsilon = 1e-14);
+        assert_abs_diff_eq!(from_hz(1100.), 16.38629404765444, epsilon = 1e-14);
+        assert_abs_diff_eq!(to_hz(1.), 66.66666666666667, epsilon = 1e-14);
+        assert_abs_diff_eq!(to_hz(16.), 1071.1702874944676, epsilon = 1e-14);
     }
 
     #[test]

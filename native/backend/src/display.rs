@@ -7,28 +7,28 @@ use tiny_skia::{Canvas, FillRule, LineCap, Paint, PathBuilder, PixmapMut, Rect, 
 
 pub type ResizeType = resize::Type;
 
-const BLACK: [u8; 4] = [0, 0, 0, 255];
-const WHITE: [u8; 4] = [255; 4];
+const BLACK: [u8; 3] = [0; 3];
+const WHITE: [u8; 3] = [255; 3];
 const THR_LONG_HEIGHT: f32 = 2.;
 const THR_N_CONSEQ_LONG_H: usize = 5;
 const WAV_STROKE_WIDTH: f32 = 1.75;
-pub const COLORMAP: [[u8; 4]; 10] = [
-    [0, 0, 4, 255],
-    [27, 12, 65, 255],
-    [74, 12, 107, 255],
-    [120, 28, 109, 255],
-    [165, 44, 96, 255],
-    [207, 68, 70, 255],
-    [237, 105, 37, 255],
-    [251, 155, 6, 255],
-    [247, 209, 61, 255],
-    [252, 255, 164, 255],
+pub const COLORMAP: [[u8; 3]; 10] = [
+    [0, 0, 4],
+    [27, 12, 65],
+    [74, 12, 107],
+    [120, 28, 109],
+    [165, 44, 96],
+    [207, 68, 70],
+    [237, 105, 37],
+    [251, 155, 6],
+    [247, 209, 61],
+    [252, 255, 164],
 ];
 pub const WAVECOLOR: [u8; 4] = [200, 21, 103, 255];
 
 #[inline]
-fn interpolate(rgba1: &[u8; 4], rgba2: &[u8; 4], ratio: f32) -> [u8; 4] {
-    let mut result = [0u8; 4];
+fn interpolate(rgba1: &[u8; 3], rgba2: &[u8; 3], ratio: f32) -> [u8; 3] {
+    let mut result = [0u8; 3];
     rgba1
         .iter()
         .zip(rgba2.iter())
@@ -39,7 +39,7 @@ fn interpolate(rgba1: &[u8; 4], rgba2: &[u8; 4], ratio: f32) -> [u8; 4] {
     result
 }
 
-fn convert_grey_to_rgba(x: f32) -> [u8; 4] {
+fn convert_grey_to_rgb(x: f32) -> [u8; 3] {
     if x < 0. {
         return BLACK;
     }
@@ -115,7 +115,7 @@ pub fn draw_blended_spec_wav_to(
 
         // wave
         // let start = Instant::now();
-        draw_wav(
+        draw_wav_to(
             canvas.pixmap().data_mut(),
             wav,
             width,
@@ -148,8 +148,8 @@ pub fn colorize_grey_with_size_to(
         .into_iter()
         .zip(output.chunks_exact_mut(4))
         .for_each(|(x, y)| {
-            let x = convert_grey_to_rgba(x);
-            y.clone_from_slice(&x[..]);
+            y[..3].copy_from_slice(&convert_grey_to_rgb(x));
+            y[3] = 255;
         });
 }
 
@@ -196,7 +196,7 @@ fn draw_wav_topbottom(
     canvas.fill_path(&path, paint, FillRule::Winding);
 }
 
-pub fn draw_wav(
+pub fn draw_wav_to(
     output: &mut [u8],
     wav: ArrayView1<f32>,
     width: u32,
@@ -273,18 +273,18 @@ pub fn draw_wav(
 mod tests {
     use super::*;
 
-    use image::RgbaImage;
-    use resize::Pixel::RGBA;
+    use image::RgbImage;
+    use resize::Pixel::RGB24;
 
     #[test]
     fn show_colorbar() {
         let (width, height) = (50, 500);
         let colormap: Vec<u8> = COLORMAP.iter().rev().flatten().cloned().collect();
-        let mut imvec = vec![0u8; width * height * 4];
-        let mut resizer = resize::new(1, 10, width, height, RGBA, ResizeType::Triangle);
+        let mut imvec = vec![0u8; width * height * 3];
+        let mut resizer = resize::new(1, 10, width, height, RGB24, ResizeType::Triangle);
         resizer.resize(&colormap, &mut imvec);
 
-        RgbaImage::from_raw(width as u32, height as u32, imvec)
+        RgbImage::from_raw(width as u32, height as u32, imvec)
             .unwrap()
             .save("../../samples/colorbar.png")
             .unwrap();
