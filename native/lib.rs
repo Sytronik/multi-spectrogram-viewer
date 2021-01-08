@@ -366,7 +366,7 @@ fn crop_cached_images_(
             Some((i, w)) => (i as isize, w as isize),
             None => return (*tup, vec![0u8; width as usize * option.height as usize * 4]),
         };
-        let slice = Slice::new(i_w_eff, Some(i_w_eff + width_eff), 1);
+        let slice = Slice::from(i_w_eff..i_w_eff + width_eff);
         let im_slice = image.slice_axis(Axis(1), slice);
 
         let pad_left = (-i_w.min(0)) as usize;

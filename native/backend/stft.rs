@@ -1,6 +1,6 @@
 use ndarray::{prelude::*, ScalarOperand};
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, num_traits::Float, FFTnum};
+use rustfft::{num_complex::Complex, num_traits::Float, FftNum};
 use std::ops::*;
 
 use super::mel;
@@ -24,7 +24,7 @@ pub fn perform_stft<A>(
     parallel: bool,
 ) -> Array2<Complex<A>>
 where
-    A: FFTnum + Float + DivAssign + ScalarOperand,
+    A: FftNum + Float + DivAssign + ScalarOperand,
 {
     let n_pad_left = (n_fft - win_length) / 2;
     let n_pad_right = (((n_fft - win_length) as f32) / 2.).ceil() as usize;

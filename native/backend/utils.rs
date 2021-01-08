@@ -1,11 +1,13 @@
-use ndarray::{concatenate, prelude::*, Data, RemoveAxis, Slice};
+use std::mem::MaybeUninit;
+
+use ndarray::{prelude::*, Data, RemoveAxis, Slice, Zip};
 use rustfft::{
     num_complex::Complex,
     num_traits::{
         identities::{One, Zero},
         Float, Num,
     },
-    FFTnum,
+    FftNum,
 };
 
 use super::realfft::RealFFT;
@@ -31,7 +33,7 @@ where
 
 pub fn rfft<A, S, D>(input: ArrayBase<S, D>) -> Array1<Complex<A>>
 where
-    A: FFTnum + Float,
+    A: FftNum + Float,
     S: Data<Elem = A>,
     D: Dimension,
 {
@@ -62,24 +64,44 @@ where
     A: Copy + Num,
     D: Dimension + RemoveAxis,
 {
+    let mut shape = array.raw_dim();
+    shape[axis.index()] += n_pad_left + n_pad_right;
+    let mut result = Array::maybe_uninit(shape);
+
+    let s_result_main = if n_pad_right > 0 {
+        Slice::new(n_pad_left as isize, Some(-(n_pad_right as isize)), 1)
+    } else {
+        Slice::new(n_pad_left as isize, None, 1)
+    };
+    Zip::from(&array).apply_assign_into(result.slice_axis_mut(axis, s_result_main), A::clone);
+    let s_result_left = Slice::from(0..n_pad_left);
+    let s_result_right = Slice::new(-(n_pad_right as isize), None, 1);
     match mode {
         PadMode::Constant(constant) => {
-            let mut shape_left = array.raw_dim();
-            let mut shape_right = array.raw_dim();
-            shape_left[axis.index()] = n_pad_left;
-            shape_right[axis.index()] = n_pad_right;
-            let pad_left = Array::from_elem(shape_left, constant);
-            let pad_right = Array::from_elem(shape_right, constant);
-            concatenate![axis, pad_left.view(), array, pad_right.view()]
+            result
+                .slice_axis_mut(axis, s_result_left)
+                .assign(&Array::from_elem(1, MaybeUninit::new(constant)));
+            if n_pad_right > 0 {
+                result
+                    .slice_axis_mut(axis, s_result_right)
+                    .assign(&Array::from_elem(1, MaybeUninit::new(constant)));
+            }
         }
         PadMode::Reflect => {
-            let s_left = Slice::new(1, Some(n_pad_left as isize + 1), -1);
-            let s_right = Slice::new(-(n_pad_right as isize + 1), Some(-1), -1);
+            let s_left = Slice::from(1..n_pad_left + 1).step_by(-1);
             let pad_left = array.slice_axis(axis, s_left);
-            let pad_right = array.slice_axis(axis, s_right);
-            concatenate![axis, pad_left, array, pad_right]
+            Zip::from(pad_left)
+                .apply_assign_into(result.slice_axis_mut(axis, s_result_left), A::clone);
+
+            if n_pad_right > 0 {
+                let s_right = Slice::new(-(n_pad_right as isize + 1), Some(-1), -1);
+                let pad_right = array.slice_axis(axis, s_right);
+                Zip::from(pad_right)
+                    .apply_assign_into(result.slice_axis_mut(axis, s_result_right), A::clone);
+            }
         }
     }
+    unsafe { result.assume_init() }
 }
 
 #[cfg(test)]

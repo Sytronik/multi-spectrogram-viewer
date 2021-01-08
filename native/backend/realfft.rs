@@ -6,7 +6,7 @@ use rustfft::{
     algorithm::Radix4,
     num_complex::Complex,
     num_traits::{Float, Zero},
-    {FFTnum, FFT},
+    FftDirection, {Fft, FftNum},
 };
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
@@ -39,20 +39,23 @@ impl FftError {
 
 /// An FFT that takes a real-valued input vector of length 2*N and transforms it to a complex
 /// spectrum of length N+1.
-pub struct RealFFT<T: FFTnum + Float> {
+pub struct RealFFT<T: FftNum + Float> {
     sin_cos: Vec<(T, T)>,
     length: usize,
     fft: Radix4<T>,
     buffer_out: Vec<Complex<T>>,
+    scratch: Vec<Complex<T>>,
 }
 
 /// An FFT that takes a real-valued input vector of length 2*N and transforms it to a complex
 /// spectrum of length N+1.
-pub struct InvRealFFT<T: FFTnum + Float> {
+#[allow(dead_code)]
+pub struct InvRealFFT<T: FftNum + Float> {
     sin_cos: Vec<(T, T)>,
     length: usize,
     fft: Radix4<T>,
     buffer_in: Vec<Complex<T>>,
+    scratch: Vec<Complex<T>>,
 }
 
 fn zip4<A, B, C, D>(
@@ -74,7 +77,7 @@ where
 
 impl<T> RealFFT<T>
 where
-    T: FFTnum + Float,
+    T: FftNum + Float,
 {
     /// Create a new RealToComplex FFT for input data of a given length. Returns an error if the length is not even.
     pub fn new(length: usize) -> Res<Self> {
@@ -91,12 +94,14 @@ where
             let cos = (k * pi / halflength).cos();
             sin_cos.push((sin, cos));
         }
-        let fft = Radix4::<T>::new(length / 2, false);
+        let fft = Radix4::<T>::new(length / 2, FftDirection::Forward);
+        let scratch = vec![Complex::zero(); fft.get_outofplace_scratch_len()];
         Ok(RealFFT {
             sin_cos,
             length,
             fft,
             buffer_out,
+            scratch,
         })
     }
 
@@ -134,8 +139,11 @@ where
         };
 
         // FFT and store result in buffer_out
-        self.fft
-            .process(&mut buf_in, &mut self.buffer_out[0..fftlen]);
+        self.fft.process_outofplace_with_scratch(
+            &mut buf_in,
+            &mut self.buffer_out[0..fftlen],
+            &mut self.scratch,
+        );
 
         self.buffer_out[fftlen] = self.buffer_out[0];
 
@@ -158,15 +166,17 @@ where
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_length(&self) -> usize {
         self.length
     }
 }
 
 /// Create a new ComplexToReal iFFT for output data of a given length. Returns an error if the length is not even.
+#[allow(dead_code)]
 impl<T> InvRealFFT<T>
 where
-    T: FFTnum + Float,
+    T: FftNum + Float,
 {
     pub fn new(length: usize) -> Res<Self> {
         if length % 2 > 0 {
@@ -182,12 +192,14 @@ where
             let cos = (k * pi / halflength).cos();
             sin_cos.push((sin, cos));
         }
-        let fft = Radix4::<T>::new(length / 2, true);
+        let fft = Radix4::<T>::new(length / 2, FftDirection::Inverse);
+        let scratch = vec![Complex::zero(); fft.get_outofplace_scratch_len()];
         Ok(InvRealFFT {
             sin_cos,
             length,
             fft,
             buffer_in,
+            scratch,
         })
     }
 
@@ -236,7 +248,11 @@ where
             let len = output.len();
             std::slice::from_raw_parts_mut(ptr, len / 2)
         };
-        self.fft.process(&mut self.buffer_in, &mut buf_out);
+        self.fft.process_outofplace_with_scratch(
+            &mut self.buffer_in,
+            &mut buf_out,
+            &mut self.scratch,
+        );
         Ok(())
     }
 }
@@ -247,7 +263,7 @@ mod tests {
     use approx::assert_abs_diff_eq;
     use rustfft::num_complex::Complex;
     use rustfft::num_traits::Zero;
-    use rustfft::FFTplanner;
+    use rustfft::FftPlanner;
 
     // Compare RealToComplex with standard FFT
     #[test]
@@ -255,20 +271,19 @@ mod tests {
         let mut indata = vec![0.0f64; 256];
         indata[0] = 1.0;
         indata[3] = 0.5;
-        let mut indata_c = indata
+        let mut inout_b = indata
             .iter()
             .map(|val| Complex::from(val))
             .collect::<Vec<Complex<f64>>>();
-        let mut fft_planner = FFTplanner::<f64>::new(false);
-        let fft = fft_planner.plan_fft(256);
+        let mut fft_planner = FftPlanner::<f64>::new();
+        let fft = fft_planner.plan_fft_forward(256);
 
         let mut r2c = RealFFT::<f64>::new(256).unwrap();
         let mut out_a = vec![Complex::<f64>::zero(); 129];
-        let mut out_b = vec![Complex::<f64>::zero(); 256];
 
-        fft.process(&mut indata_c, &mut out_b);
+        fft.process(&mut inout_b);
         r2c.process(&mut indata, &mut out_a).unwrap();
-        assert_abs_diff_eq!(&out_a[0..129], &out_b[0..129], epsilon = 1e-15);
+        assert_abs_diff_eq!(&out_a[0..129], &inout_b[0..129], epsilon = 1e-15);
     }
 
     // Compare ComplexToReal with standard iFFT
@@ -281,17 +296,16 @@ mod tests {
         indata[3] = Complex::new(0.3, 0.2);
         indata[253] = Complex::new(0.3, -0.2);
 
-        let mut fft_planner = FFTplanner::<f64>::new(true);
-        let fft = fft_planner.plan_fft(256);
+        let mut fft_planner = FftPlanner::<f64>::new();
+        let fft = fft_planner.plan_fft_inverse(256);
 
         let mut c2r = InvRealFFT::<f64>::new(256).unwrap();
         let mut out_a = vec![0f64; 256];
-        let mut out_b = vec![Complex::<f64>::zero(); 256];
 
         c2r.process(&indata[0..129], &mut out_a).unwrap();
-        fft.process(&mut indata, &mut out_b);
+        fft.process(&mut indata);
 
-        let out_b_r: Vec<f64> = out_b.iter().map(|val| 0.5 * val.re).collect();
-        assert_abs_diff_eq!(&out_a[..], &out_b_r[..], epsilon = 1e-15);
+        let out_b: Vec<f64> = indata.iter().map(|val| 0.5 * val.re).collect();
+        assert_abs_diff_eq!(&out_a[..], &out_b[..], epsilon = 1e-15);
     }
 }
