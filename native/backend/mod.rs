@@ -255,18 +255,18 @@ impl TrackManager {
         result.par_extend(id_ch_tuples.par_iter().map(|&(id, ch)| {
             let track = self.tracks.get(&id).unwrap();
             let width = track.calc_width(px_per_sec);
-            let mut arr = Array3::zeros((height as usize, width as usize, 4));
-            match kind {
+            let arr = match kind {
                 ImageKind::Spec => {
-                    display::colorize_grey_with_size_to(
-                        arr.as_slice_mut().unwrap(),
+                    let vec = display::colorize_grey_with_size(
                         self.spec_greys.get(&(id, ch)).unwrap().view(),
                         width,
                         height,
                         false,
                     );
+                    Array3::from_shape_vec((height as usize, width as usize, 4), vec).unwrap()
                 }
                 ImageKind::Wav(option_for_wav) => {
+                    let mut arr = Array3::zeros((height as usize, width as usize, 4));
                     display::draw_wav_to(
                         arr.as_slice_mut().unwrap(),
                         track.get_wav(ch),
@@ -275,9 +275,9 @@ impl TrackManager {
                         255,
                         option_for_wav.amp_range,
                     );
+                    arr
                 }
-            }
-
+            };
             ((id, ch), arr)
         }));
         println!("draw entire: {:?}", start.elapsed());
@@ -301,23 +301,19 @@ impl TrackManager {
             let (pad_left, drawing_width, pad_right) =
                 self.calc_drawing_pad_width_of(id, sec, width, px_per_sec);
 
-            let empty_image_entry = || ((id, ch), vec![0u8; width as usize * height as usize * 4]);
+            let create_empty_im_entry =
+                || ((id, ch), vec![0u8; width as usize * height as usize * 4]);
             if drawing_width == 0 {
-                return empty_image_entry();
+                return create_empty_im_entry();
             }
 
-            let get_drawing_image = || Array3::zeros((height as usize, drawing_width as usize, 4));
-
-            let mut arr;
-            match kind {
+            let arr = match kind {
                 ImageKind::Spec => {
                     let grey_sub = match self.crop_grey_of(id, ch, sec, width, px_per_sec) {
                         Some(x) => x,
-                        None => return empty_image_entry(),
+                        None => return create_empty_im_entry(),
                     };
-                    arr = get_drawing_image();
-                    display::colorize_grey_with_size_to(
-                        arr.as_slice_mut().unwrap(),
+                    let vec = display::colorize_grey_with_size(
                         grey_sub.view(),
                         drawing_width,
                         height,
@@ -326,13 +322,15 @@ impl TrackManager {
                             None => false,
                         },
                     );
+                    Array3::from_shape_vec((height as usize, drawing_width as usize, 4), vec)
+                        .unwrap()
                 }
                 ImageKind::Wav(option_for_wav) => {
                     let wav_slice = match self.slice_wav_of(id, ch, sec, width, px_per_sec) {
                         Some(x) => x,
-                        None => return empty_image_entry(),
+                        None => return create_empty_im_entry(),
                     };
-                    arr = get_drawing_image();
+                    let mut arr = Array3::zeros((height as usize, drawing_width as usize, 4));
                     display::draw_wav_to(
                         arr.as_slice_mut().unwrap(),
                         wav_slice,
@@ -341,8 +339,9 @@ impl TrackManager {
                         255,
                         option_for_wav.amp_range,
                     );
+                    arr
                 }
-            }
+            };
 
             if width == drawing_width {
                 ((id, ch), arr.into_raw_vec())
@@ -363,15 +362,12 @@ impl TrackManager {
     }
 
     pub fn get_spec_image_of(&self, id: usize, ch: usize, width: u32, height: u32) -> Vec<u8> {
-        let mut result = vec![0u8; (width * height * 4) as usize];
-        display::colorize_grey_with_size_to(
-            &mut result[..],
+        display::colorize_grey_with_size(
             self.spec_greys.get(&(id, ch)).unwrap().view(),
             width,
             height,
             false,
-        );
-        result
+        )
     }
 
     pub fn get_wav_image_of(
@@ -403,9 +399,7 @@ impl TrackManager {
         option_for_wav: DrawOptionForWav,
         blend: f64,
     ) -> Vec<u8> {
-        let mut result = vec![0u8; (width * height * 4) as usize];
-        display::draw_blended_spec_wav_to(
-            &mut result[..],
+        display::draw_blended_spec_wav(
             self.spec_greys.get(&(id, ch)).unwrap().view(),
             self.tracks.get(&id).unwrap().get_wav(ch),
             width,
@@ -413,8 +407,7 @@ impl TrackManager {
             option_for_wav.amp_range,
             false,
             blend,
-        );
-        result
+        )
     }
 
     fn calc_drawing_pad_width_of(

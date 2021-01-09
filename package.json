@@ -45,7 +45,7 @@
     "start": "rescripts start",
     "build": "run build.debug",
     "build.debug": "run-s build.debug.backend build.debug.frontend",
-    "build.debug.backend": "DEBUG\"napi:*\" electron-build-env napi build",
+    "build.debug.backend": "DEBUG=\"napi:*\" electron-build-env napi build",
     "build.debug.frontend": "rescripts build",
     "build.release": "run-s build.release.backend build.release.frontend",
     "build.release.backend": "electron-build-env napi build --release",

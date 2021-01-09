@@ -1,4 +1,4 @@
-use std::iter;
+use std::{iter, mem::MaybeUninit};
 // use std::time::Instant;
 
 use ndarray::prelude::*;
@@ -29,24 +29,20 @@ pub const WAVECOLOR: [u8; 3] = [200, 21, 103];
 pub const MAX_SIZE: u32 = 8192;
 
 #[inline]
-fn interpolate(rgba1: &[u8; 3], rgba2: &[u8; 3], ratio: f32) -> [u8; 3] {
-    let mut result = [0u8; 3];
+fn interpolate(rgba1: &[u8], rgba2: &[u8], ratio: f32) -> Vec<u8> {
     rgba1
         .iter()
         .zip(rgba2.iter())
-        .zip(result.iter_mut())
-        .for_each(|((&a, &b), x)| {
-            *x = (ratio * a as f32 + (1. - ratio) * b as f32).round() as u8;
-        });
-    result
+        .map(|(&a, &b)| (ratio * a as f32 + (1. - ratio) * b as f32).round() as u8)
+        .collect()
 }
 
-fn convert_grey_to_rgb(x: f32) -> [u8; 3] {
+fn convert_grey_to_rgb(x: f32) -> Vec<u8> {
     if x < 0. {
-        return BLACK;
+        return BLACK.to_vec();
     }
     if x >= 1. {
-        return WHITE;
+        return WHITE.to_vec();
     }
     let position = x * COLORMAP.len() as f32;
     let index = position.floor() as usize;
@@ -64,17 +60,22 @@ pub fn convert_spec_to_grey(
     max: f32,
     min: f32,
 ) -> Array2<f32> {
+    // spec: T x F
+    // return: grey image with F(inverted) x T
     let width = spec.shape()[0];
     let height = (spec.shape()[1] as f32 * up_ratio).round() as usize;
-    let mut grey = Array2::<f32>::zeros((height, width));
-    spec.indexed_iter().for_each(|((i, j), &x)| {
-        grey[[height - 1 - j, i]] = (x - min) / (max - min);
+    let mut grey = Array2::maybe_uninit((height, width));
+    grey.indexed_iter_mut().for_each(|((i, j), x)| {
+        if height - 1 - i < spec.raw_dim()[1] {
+            *x = MaybeUninit::new((spec[[j, height - 1 - i]] - min) / (max - min));
+        } else {
+            *x = MaybeUninit::new(0.);
+        }
     });
-    grey
+    unsafe { grey.assume_init() }
 }
 
-pub fn draw_blended_spec_wav_to(
-    output: &mut [u8],
+pub fn draw_blended_spec_wav(
     spec_grey: ArrayView2<f32>,
     wav: ArrayView1<f32>,
     width: u32,
@@ -82,8 +83,9 @@ pub fn draw_blended_spec_wav_to(
     amp_range: (f32, f32),
     fast_resize: bool,
     blend: f64,
-) {
-    let pixmap = PixmapMut::from_bytes(output, width, height).unwrap();
+) -> Vec<u8> {
+    let mut result = vec![0u8; width as usize * height as usize * 4];
+    let pixmap = PixmapMut::from_bytes(&mut result[..], width, height).unwrap();
     let mut canvas = Canvas::from(pixmap);
 
     // spec
@@ -124,6 +126,7 @@ pub fn draw_blended_spec_wav_to(
         );
         // println!("drawing wav: {:?}", start.elapsed());
     }
+    result
 }
 
 pub fn colorize_grey_with_size_to(
@@ -155,6 +158,33 @@ pub fn colorize_grey_with_size_to(
             y[..3].copy_from_slice(&convert_grey_to_rgb(x));
             y[3] = 255;
         });
+}
+
+pub fn colorize_grey_with_size(
+    grey: ArrayView2<f32>,
+    width: u32,
+    height: u32,
+    fast_resize: bool,
+) -> Vec<u8> {
+    let resizetype = if fast_resize {
+        ResizeType::Point
+    } else {
+        ResizeType::Lanczos3
+    };
+    let mut resizer = resize::new(
+        grey.shape()[1] as usize,
+        grey.shape()[0] as usize,
+        width as usize,
+        height as usize,
+        GrayF32,
+        resizetype,
+    );
+    let mut resized = vec![0f32; (width * height) as usize];
+    resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
+    resized
+        .into_iter()
+        .flat_map(|x| convert_grey_to_rgb(x).into_iter().chain(iter::once(255)))
+        .collect()
 }
 
 fn draw_wav_directly(wav_avg: &[f32], canvas: &mut Canvas, paint: &Paint) {
