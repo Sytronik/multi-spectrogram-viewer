@@ -117,6 +117,7 @@ pub fn convert_id_ch_vec_to_jsarr<'a>(
     Ok(obj)
 }
 
+#[inline]
 pub fn draw_option_from_js_obj(js_obj: JsObject) -> JsResult<DrawOption> {
     Ok(DrawOption {
         px_per_sec: js_obj
@@ -128,6 +129,7 @@ pub fn draw_option_from_js_obj(js_obj: JsObject) -> JsResult<DrawOption> {
     })
 }
 
+#[inline]
 pub fn draw_opt_for_wav_from_js_obj(js_obj: JsObject) -> JsResult<DrawOptionForWav> {
     Ok(DrawOptionForWav {
         amp_range: (
@@ -159,6 +161,7 @@ pub fn set_images_to(
     Ok(())
 }
 
+#[inline]
 pub fn extract_intersect<T: Clone + Eq + Hash>(
     a: &mut HashSet<T>,
     b: &mut HashSet<T>,

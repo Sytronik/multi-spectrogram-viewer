@@ -12,6 +12,7 @@ use rustfft::{
 
 use super::realfft::RealFFT;
 
+#[inline]
 pub fn calc_proper_n_fft(win_length: usize) -> usize {
     2usize.pow((win_length as f32).log2().ceil() as u32)
 }
@@ -69,35 +70,51 @@ where
     let mut result = Array::maybe_uninit(shape);
 
     let s_result_main = if n_pad_right > 0 {
-        Slice::new(n_pad_left as isize, Some(-(n_pad_right as isize)), 1)
+        Slice::from(n_pad_left as isize..-(n_pad_right as isize))
     } else {
-        Slice::new(n_pad_left as isize, None, 1)
+        Slice::from(n_pad_left as isize..)
     };
     Zip::from(&array).apply_assign_into(result.slice_axis_mut(axis, s_result_main), A::clone);
-    let s_result_left = Slice::from(0..n_pad_left);
-    let s_result_right = Slice::new(-(n_pad_right as isize), None, 1);
     match mode {
         PadMode::Constant(constant) => {
             result
-                .slice_axis_mut(axis, s_result_left)
-                .assign(&Array::from_elem(1, MaybeUninit::new(constant)));
+                .slice_axis_mut(axis, Slice::from(..n_pad_left))
+                .mapv_inplace(|_| MaybeUninit::new(constant));
             if n_pad_right > 0 {
                 result
-                    .slice_axis_mut(axis, s_result_right)
-                    .assign(&Array::from_elem(1, MaybeUninit::new(constant)));
+                    .slice_axis_mut(axis, Slice::from(-(n_pad_right as isize)..))
+                    .mapv_inplace(|_| MaybeUninit::new(constant));
             }
         }
         PadMode::Reflect => {
-            let s_left = Slice::from(1..n_pad_left + 1).step_by(-1);
-            let pad_left = array.slice_axis(axis, s_left);
-            Zip::from(pad_left)
-                .apply_assign_into(result.slice_axis_mut(axis, s_result_left), A::clone);
+            let pad_left = array
+                .axis_iter(axis)
+                .skip(1)
+                .chain(array.axis_iter(axis).rev().skip(1))
+                .cycle()
+                .take(n_pad_left);
+            result
+                .axis_iter_mut(axis)
+                .take(n_pad_left)
+                .rev()
+                .zip(pad_left)
+                .for_each(|(y, x)| Zip::from(x).apply_assign_into(y, A::clone));
 
             if n_pad_right > 0 {
-                let s_right = Slice::new(-(n_pad_right as isize + 1), Some(-1), -1);
-                let pad_right = array.slice_axis(axis, s_right);
-                Zip::from(pad_right)
-                    .apply_assign_into(result.slice_axis_mut(axis, s_result_right), A::clone);
+                let pad_right = array
+                    .axis_iter(axis)
+                    .rev()
+                    .skip(1)
+                    .chain(array.axis_iter(axis).skip(1))
+                    .cycle()
+                    .take(n_pad_right);
+                result
+                    .axis_iter_mut(axis)
+                    .rev()
+                    .take(n_pad_right)
+                    .rev()
+                    .zip(pad_right)
+                    .for_each(|(y, x)| Zip::from(x).apply_assign_into(y, A::clone));
             }
         }
     }
@@ -131,8 +148,8 @@ mod tests {
             arr2(&[[10, 10, 10], [1, 2, 3], [10, 10, 10], [10, 10, 10]])
         );
         assert_eq!(
-            pad(arr2(&[[1, 2, 3]]).view(), (1, 2), Axis(1), PadMode::Reflect),
-            arr2(&[[2, 1, 2, 3, 2, 1]])
+            pad(arr2(&[[1, 2, 3]]).view(), (3, 4), Axis(1), PadMode::Reflect),
+            arr2(&[[2, 3, 2, 1, 2, 3, 2, 1, 2, 3]])
         );
     }
 }
