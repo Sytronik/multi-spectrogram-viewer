@@ -1,7 +1,6 @@
 #![deny(clippy::all)]
 
 use std::convert::TryInto;
-use std::sync::Arc;
 use std::sync::{RwLock, RwLockReadGuard};
 use std::time::Instant;
 
@@ -30,7 +29,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 lazy_static! {
-    static ref TM: Arc<RwLock<TrackManager>> = Arc::new(RwLock::new(TrackManager::new()));
+    static ref TM: RwLock<TrackManager> = RwLock::new(TrackManager::new());
 
     static ref DRAWOPTION: RwLock<DrawOption> = RwLock::new(DrawOption {
         px_per_sec: 0.,
