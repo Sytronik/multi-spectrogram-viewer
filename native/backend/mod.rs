@@ -361,6 +361,21 @@ impl TrackManager {
         result
     }
 
+    pub fn get_overview_of(&self, id: usize, width: u32, height: u32) -> Vec<u8> {
+        let track = self.tracks.get(&id).unwrap();
+        let ch_h = height / track.n_ch as u32;
+        let i_start = (height % track.n_ch as u32 / 2 * width * 4) as usize;
+        let i_end = i_start + (track.n_ch as u32 * ch_h * width * 4) as usize;
+        let mut result = vec![0u8; (height * width * 4) as usize];
+        result[i_start..i_end]
+            .par_chunks_exact_mut((ch_h * width * 4) as usize)
+            .enumerate()
+            .for_each(|(ch, x)| {
+                display::draw_wav_to(&mut x[..], track.get_wav(ch), width, ch_h, 255, (-1., 1.))
+            });
+        result
+    }
+
     pub fn get_spec_image_of(&self, id: usize, ch: usize, width: u32, height: u32) -> Vec<u8> {
         display::colorize_grey_with_size(
             self.spec_greys.get(&(id, ch)).unwrap().view(),
