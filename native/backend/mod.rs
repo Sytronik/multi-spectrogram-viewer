@@ -461,8 +461,9 @@ impl TrackManager {
             .collect()
     }
 
-    pub fn calc_hz_of(&self, id: usize, relative_freq: f32) -> f32 {
-        let half_sr = self.tracks.get(&id).unwrap().sr as f32 / 2.;
+    pub fn calc_hz_of(&self, y: u32, height: u32) -> f32 {
+        let half_sr = self.max_sr as f32 / 2.;
+        let relative_freq = 1. - y as f32 / height as f32;
 
         match self.setting.freq_scale {
             FreqScale::Linear => half_sr * relative_freq,
