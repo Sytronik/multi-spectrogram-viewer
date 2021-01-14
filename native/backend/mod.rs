@@ -425,26 +425,6 @@ impl TrackManager {
         )
     }
 
-    fn calc_drawing_pad_width_of(
-        &self,
-        id: usize,
-        sec: f64,
-        width: u32,
-        px_per_sec: f64,
-    ) -> (u32, u32, u32) {
-        let track = self.tracks.get(&id).unwrap();
-
-        let total_width = (px_per_sec * track.wavlen() as f64 / track.sr as f64).max(1.);
-        let pad_left = ((-sec * px_per_sec).max(0.).round() as u32).min(width);
-        let pad_right = ((sec * px_per_sec + width as f64 - total_width)
-            .max(0.)
-            .round() as u32)
-            .min(width - pad_left);
-
-        let drawing_width = width - pad_left - pad_right;
-        (pad_left, drawing_width, pad_right)
-    }
-
     #[inline]
     pub fn id_ch_tuples(&self) -> IdChVec {
         self.specs.keys().cloned().collect()
@@ -650,6 +630,26 @@ impl TrackManager {
         let length = ((track.sr as u64 * width as u64) as f64 / px_per_sec).round() as usize;
         let (i, length) = calc_effective_w(i, length, track.wavlen())?;
         Some(track.wavs.slice(s![ch, i..i + length]))
+    }
+
+    fn calc_drawing_pad_width_of(
+        &self,
+        id: usize,
+        sec: f64,
+        width: u32,
+        px_per_sec: f64,
+    ) -> (u32, u32, u32) {
+        let track = self.tracks.get(&id).unwrap();
+
+        let total_width = (px_per_sec * track.wavlen() as f64 / track.sr as f64).max(1.);
+        let pad_left = ((-sec * px_per_sec).max(0.).round() as u32).min(width);
+        let pad_right = ((sec * px_per_sec + width as f64 - total_width)
+            .max(0.)
+            .round() as u32)
+            .min(width - pad_left);
+
+        let drawing_width = width - pad_left - pad_right;
+        (pad_left, drawing_width, pad_right)
     }
 }
 
