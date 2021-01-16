@@ -309,12 +309,15 @@ impl TrackManager {
 
             let arr = match kind {
                 ImageKind::Spec => {
-                    let grey_sub = match self.crop_grey_of(id, ch, sec, width, px_per_sec) {
-                        Some(x) => x,
-                        None => return create_empty_im_entry(),
-                    };
-                    let vec = display::colorize_grey_with_size(
-                        grey_sub.view(),
+                    let (part_i_w, part_width) =
+                        match self.calc_part_grey_info(id, ch, sec, width, px_per_sec) {
+                            Some(x) => x,
+                            None => return create_empty_im_entry(),
+                        };
+                    let vec = display::colorize_part_grey_with_size(
+                        self.spec_greys.get(&(id, ch)).unwrap().view(),
+                        part_i_w,
+                        part_width,
                         drawing_width,
                         height,
                         match fast_resize_vec {
@@ -595,14 +598,14 @@ impl TrackManager {
         changed
     }
 
-    fn crop_grey_of(
+    fn calc_part_grey_info(
         &self,
         id: usize,
         ch: usize,
         sec: f64,
         target_width: u32,
         px_per_sec: f64,
-    ) -> Option<Array2<f32>> {
+    ) -> Option<(usize, usize)> {
         let track = self.tracks.get(&id).unwrap();
         let spec_grey = self.spec_greys.get(&(id, ch)).unwrap();
         let total_width = spec_grey.shape()[1] as u64;
@@ -612,9 +615,7 @@ impl TrackManager {
         let width = ((total_width * target_width as u64 * sr) as f64 / wavlen / px_per_sec)
             .max(MIN_WIDTH as f64)
             .round() as usize;
-        let (i_w, width) = calc_effective_w(i_w, width, total_width as usize)?;
-        let im = spec_grey.slice(s![.., i_w..i_w + width]).into_owned();
-        Some(im)
+        calc_effective_w(i_w, width, total_width as usize)
     }
 
     fn slice_wav_of(

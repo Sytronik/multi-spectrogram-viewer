@@ -17,13 +17,13 @@ napi = {version = "1.1.0", features = ["napi7"]}
 napi-derive = "1.0.0"
 
 approx = {version = "0.4.0", features = ["num-complex"]}
+cached = "0.22.0"
 hound = "3.4.0"
 lazy_static = "1.4.0"
 ndarray = {version = "0.14.0", features = ["rayon", "approx"]}
 num-traits = "0.2.14"
 rayon = "1.5.0"
 readonly = "0.2"
-resize = "0.5.5"
 rodio = "0.13.0"
 rustfft = "5.0.0"
 tiny-skia = "0.4.0"
@@ -31,6 +31,10 @@ tiny-skia = "0.4.0"
 [dependencies.ndarray-stats]
 git = "https://github.com/rust-ndarray/ndarray-stats.git"
 rev = "74a818026aca7c3ed40a3de09c779d225f3eef67"
+
+[dependencies.resize]
+git = "https://github.com/Sytronik/resize.git"
+rev = "51fd0b7c4c73c0051cfdfab2c3e963312b588789"
 
 [target.'cfg(all(unix, not(target_env = "musl"), not(target_arch = "aarch64")))'.dependencies]
 jemallocator = {version = "0.3", features = ["disable_initial_exec_tls"]}

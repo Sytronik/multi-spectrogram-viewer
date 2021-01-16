@@ -1,9 +1,10 @@
 use std::{iter, mem::MaybeUninit};
 // use std::time::Instant;
 
+use cached::proc_macro::cached;
 use ndarray::prelude::*;
 use ndarray_stats::QuantileExt;
-use resize::{self, Pixel::GrayF32};
+use resize::{self, formats::Gray, Pixel::GrayF32, Resizer};
 use tiny_skia::{Canvas, FillRule, LineCap, Paint, PathBuilder, PixmapMut, Rect, Stroke};
 
 pub type ResizeType = resize::Type;
@@ -129,6 +130,54 @@ pub fn draw_blended_spec_wav(
     result
 }
 
+fn colorize_grey_vec(grey: Vec<f32>) -> Vec<u8> {
+    grey.into_iter()
+        .flat_map(|x| convert_grey_to_rgb(x).into_iter().chain(iter::once(255)))
+        .collect()
+}
+
+pub fn colorize_grey_with_size(
+    grey: ArrayView2<f32>,
+    width: u32,
+    height: u32,
+    fast_resize: bool,
+) -> Vec<u8> {
+    let mut resizer = create_resizer(
+        grey.shape()[1],
+        grey.shape()[0],
+        width as usize,
+        height as usize,
+        fast_resize,
+    );
+    let mut resized = vec![0f32; (width * height) as usize];
+    resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
+    colorize_grey_vec(resized)
+}
+
+pub fn colorize_part_grey_with_size(
+    grey: ArrayView2<f32>,
+    part_i_w: usize,
+    part_width: usize,
+    width: u32,
+    height: u32,
+    fast_resize: bool,
+) -> Vec<u8> {
+    let mut resizer = create_resizer(
+        part_width,
+        grey.shape()[0],
+        width as usize,
+        height as usize,
+        fast_resize,
+    );
+    let mut resized = vec![0f32; (width * height) as usize];
+    resizer.resize_stride(
+        &grey.as_slice().unwrap()[part_i_w..],
+        grey.shape()[1],
+        &mut resized[..],
+    );
+    colorize_grey_vec(resized)
+}
+
 pub fn colorize_grey_with_size_to(
     output: &mut [u8],
     grey: ArrayView2<f32>,
@@ -136,18 +185,12 @@ pub fn colorize_grey_with_size_to(
     height: u32,
     fast_resize: bool,
 ) {
-    let resizetype = if fast_resize {
-        ResizeType::Point
-    } else {
-        ResizeType::Lanczos3
-    };
-    let mut resizer = resize::new(
+    let mut resizer = create_resizer(
         grey.shape()[1] as usize,
         grey.shape()[0] as usize,
         width as usize,
         height as usize,
-        GrayF32,
-        resizetype,
+        fast_resize,
     );
     let mut resized = vec![0f32; (width * height) as usize];
     resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
@@ -158,33 +201,6 @@ pub fn colorize_grey_with_size_to(
             y[..3].copy_from_slice(&convert_grey_to_rgb(x));
             y[3] = 255;
         });
-}
-
-pub fn colorize_grey_with_size(
-    grey: ArrayView2<f32>,
-    width: u32,
-    height: u32,
-    fast_resize: bool,
-) -> Vec<u8> {
-    let resizetype = if fast_resize {
-        ResizeType::Point
-    } else {
-        ResizeType::Lanczos3
-    };
-    let mut resizer = resize::new(
-        grey.shape()[1] as usize,
-        grey.shape()[0] as usize,
-        width as usize,
-        height as usize,
-        GrayF32,
-        resizetype,
-    );
-    let mut resized = vec![0f32; (width * height) as usize];
-    resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
-    resized
-        .into_iter()
-        .flat_map(|x| convert_grey_to_rgb(x).into_iter().chain(iter::once(255)))
-        .collect()
 }
 
 fn draw_wav_directly(wav_avg: &[f32], canvas: &mut Canvas, paint: &Paint) {
@@ -262,14 +278,7 @@ pub fn draw_wav_to(
     if samples_per_px < 2. {
         let mut upsampled = Array1::<f32>::zeros(width as usize);
         // naive upsampling
-        let mut resizer = resize::new(
-            wav.len(),
-            1,
-            width as usize,
-            1,
-            GrayF32,
-            ResizeType::Triangle,
-        );
+        let mut resizer = create_resizer(wav.len(), 1, width as usize, 1, false);
         resizer.resize(wav.as_slice().unwrap(), upsampled.as_slice_mut().unwrap());
         upsampled.mapv_inplace(amp_to_height_px);
         draw_wav_directly(upsampled.as_slice().unwrap(), &mut canvas, &paint);
@@ -313,6 +322,28 @@ pub fn get_colormap_rgba() -> Vec<u8> {
         .iter()
         .flat_map(|x| x.iter().cloned().chain(iter::once(255)))
         .collect()
+}
+
+#[cached(size = 64)]
+fn create_resizer(
+    src_width: usize,
+    src_height: usize,
+    dest_width: usize,
+    dest_height: usize,
+    fast_resize: bool,
+) -> Resizer<Gray<f32, f32>> {
+    resize::new(
+        src_width,
+        src_height,
+        dest_width,
+        dest_height,
+        GrayF32,
+        if fast_resize {
+            ResizeType::Point
+        } else {
+            ResizeType::Lanczos3
+        },
+    )
 }
 
 #[cfg(test)]
