@@ -3,10 +3,9 @@ use std::f64::consts::PI as PIf64;
 use std::fmt;
 
 use rustfft::{
-    algorithm::Radix4,
     num_complex::Complex,
     num_traits::{Float, Zero},
-    FftDirection, {Fft, FftNum},
+    FftNum, FftPlanner,
 };
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
@@ -39,10 +38,11 @@ impl FftError {
 
 /// An FFT that takes a real-valued input vector of length 2*N and transforms it to a complex
 /// spectrum of length N+1.
+#[readonly::make]
 pub struct RealFFT<T: FftNum + Float> {
     sin_cos: Vec<(T, T)>,
-    length: usize,
-    fft: Radix4<T>,
+    pub length: usize,
+    fft: std::sync::Arc<dyn rustfft::Fft<T>>,
     buffer_out: Vec<Complex<T>>,
     scratch: Vec<Complex<T>>,
 }
@@ -50,10 +50,11 @@ pub struct RealFFT<T: FftNum + Float> {
 /// An FFT that takes a real-valued input vector of length 2*N and transforms it to a complex
 /// spectrum of length N+1.
 #[allow(dead_code)]
+#[readonly::make]
 pub struct InvRealFFT<T: FftNum + Float> {
     sin_cos: Vec<(T, T)>,
-    length: usize,
-    fft: Radix4<T>,
+    pub length: usize,
+    fft: std::sync::Arc<dyn rustfft::Fft<T>>,
     buffer_in: Vec<Complex<T>>,
     scratch: Vec<Complex<T>>,
 }
@@ -94,7 +95,8 @@ where
             let cos = (k * pi / halflength).cos();
             sin_cos.push((sin, cos));
         }
-        let fft = Radix4::<T>::new(length / 2, FftDirection::Forward);
+        let mut fft_planner = FftPlanner::<T>::new();
+        let fft = fft_planner.plan_fft_forward(length / 2);
         let scratch = vec![Complex::zero(); fft.get_outofplace_scratch_len()];
         Ok(RealFFT {
             sin_cos,
@@ -165,11 +167,6 @@ where
         output[fftlen] = Complex::new(self.buffer_out[0].re - self.buffer_out[0].im, T::zero());
         Ok(())
     }
-
-    #[allow(dead_code)]
-    pub fn get_length(&self) -> usize {
-        self.length
-    }
 }
 
 /// Create a new ComplexToReal iFFT for output data of a given length. Returns an error if the length is not even.
@@ -192,7 +189,8 @@ where
             let cos = (k * pi / halflength).cos();
             sin_cos.push((sin, cos));
         }
-        let fft = Radix4::<T>::new(length / 2, FftDirection::Inverse);
+        let mut fft_planner = FftPlanner::<T>::new();
+        let fft = fft_planner.plan_fft_inverse(length / 2);
         let scratch = vec![Complex::zero(); fft.get_outofplace_scratch_len()];
         Ok(InvRealFFT {
             sin_cos,
@@ -232,13 +230,10 @@ where
             &self.sin_cos,
             &mut self.buffer_in[..],
         ) {
-            let xr = T::from(0.5).unwrap()
-                * ((buf.re + buf_rev.re)
-                    - cos * (buf.im + buf_rev.im)
-                    - sin * (buf.re - buf_rev.re));
-            let xi = T::from(0.5).unwrap()
-                * ((buf.im - buf_rev.im) + cos * (buf.re - buf_rev.re)
-                    - sin * (buf.im + buf_rev.im));
+            let xr =
+                (buf.re + buf_rev.re) - cos * (buf.im + buf_rev.im) - sin * (buf.re - buf_rev.re);
+            let xi =
+                (buf.im - buf_rev.im) + cos * (buf.re - buf_rev.re) - sin * (buf.im + buf_rev.im);
             *fft_input = Complex::new(xr, xi);
         }
 
