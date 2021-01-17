@@ -262,6 +262,7 @@ impl TrackManager {
                         width,
                         height,
                         false,
+                        None,
                     );
                     Array3::from_shape_vec((height as usize, width as usize, 4), vec).unwrap()
                 }
@@ -272,8 +273,8 @@ impl TrackManager {
                         track.get_wav(ch),
                         width,
                         height,
-                        255,
                         option_for_wav.amp_range,
+                        None,
                     );
                     arr
                 }
@@ -314,16 +315,15 @@ impl TrackManager {
                             Some(x) => x,
                             None => return create_empty_im_entry(),
                         };
-                    let vec = display::colorize_part_grey_with_size(
+                    let vec = display::colorize_grey_with_size(
                         self.spec_greys.get(&(id, ch)).unwrap().view(),
-                        part_i_w,
-                        part_width,
                         drawing_width,
                         height,
                         match fast_resize_vec {
                             Some(ref vec) => vec[i],
                             None => false,
                         },
+                        Some((part_i_w, part_width)),
                     );
                     Array3::from_shape_vec((height as usize, drawing_width as usize, 4), vec)
                         .unwrap()
@@ -339,8 +339,8 @@ impl TrackManager {
                         wav_slice,
                         drawing_width,
                         height,
-                        255,
                         option_for_wav.amp_range,
+                        None,
                     );
                     arr
                 }
@@ -369,12 +369,12 @@ impl TrackManager {
         let ch_h = height / track.n_ch as u32;
         let i_start = (height % track.n_ch as u32 / 2 * width * 4) as usize;
         let i_end = i_start + (track.n_ch as u32 * ch_h * width * 4) as usize;
-        let mut result = vec![0u8; (height * width * 4) as usize];
+        let mut result = vec![0u8; width as usize * height as usize * 4];
         result[i_start..i_end]
-            .par_chunks_exact_mut((ch_h * width * 4) as usize)
+            .par_chunks_exact_mut(ch_h as usize * width as usize * 4)
             .enumerate()
             .for_each(|(ch, x)| {
-                display::draw_wav_to(&mut x[..], track.get_wav(ch), width, ch_h, 255, (-1., 1.))
+                display::draw_wav_to(&mut x[..], track.get_wav(ch), width, ch_h, (-1., 1.), None)
             });
         result
     }
@@ -385,6 +385,7 @@ impl TrackManager {
             width,
             height,
             false,
+            None,
         )
     }
 
@@ -396,14 +397,14 @@ impl TrackManager {
         height: u32,
         amp_range: (f32, f32),
     ) -> Vec<u8> {
-        let mut result = vec![0u8; (width * height * 4) as usize];
+        let mut result = vec![0u8; width as usize * height as usize * 4];
         display::draw_wav_to(
             &mut result[..],
             self.tracks.get(&id).unwrap().get_wav(ch),
             width,
             height,
-            255,
             amp_range,
+            None,
         );
         result
     }

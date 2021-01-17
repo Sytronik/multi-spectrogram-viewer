@@ -85,55 +85,36 @@ pub fn draw_blended_spec_wav(
     fast_resize: bool,
     blend: f64,
 ) -> Vec<u8> {
-    let mut result = vec![0u8; width as usize * height as usize * 4];
+    // spec
+    let mut result = if blend > 0. {
+        colorize_grey_with_size(spec_grey, width, height, fast_resize, None)
+    } else {
+        vec![0u8; width as usize * height as usize * 4]
+    };
+
     let pixmap = PixmapMut::from_bytes(&mut result[..], width, height).unwrap();
     let mut canvas = Canvas::from(pixmap);
 
-    // spec
-    if blend > 0. {
-        // let start = Instant::now();
-
-        colorize_grey_with_size_to(
-            canvas.pixmap().data_mut(),
-            spec_grey,
-            width,
-            height,
-            fast_resize,
-        );
-
-        // println!("drawing spec: {:?}", start.elapsed());
-    }
-
     if blend < 1. {
         // black
-        // let start = Instant::now();
         if blend < 0.5 {
             let rect = Rect::from_xywh(0., 0., width as f32, height as f32).unwrap();
             let mut paint = Paint::default();
-            paint.set_color_rgba8(0, 0, 0, (255. * (1. - 2. * blend)).round() as u8);
+            paint.set_color_rgba8(0, 0, 0, (u8::MAX as f64 * (1. - 2. * blend)).round() as u8);
             canvas.fill_rect(rect, &paint);
         }
-        // println!("drawing blackbox: {:?}", start.elapsed());
 
         // wave
-        // let start = Instant::now();
         draw_wav_to(
             canvas.pixmap().data_mut(),
             wav,
             width,
             height,
-            (255. * (2. - 2. * blend).min(1.)).round() as u8,
             amp_range,
+            Some((u8::MAX as f64 * (2. - 2. * blend).min(1.)).round() as u8),
         );
-        // println!("drawing wav: {:?}", start.elapsed());
     }
     result
-}
-
-fn colorize_grey_vec(grey: Vec<f32>) -> Vec<u8> {
-    grey.into_iter()
-        .flat_map(|x| convert_grey_to_rgb(x).into_iter().chain(iter::once(255)))
-        .collect()
 }
 
 pub fn colorize_grey_with_size(
@@ -141,66 +122,35 @@ pub fn colorize_grey_with_size(
     width: u32,
     height: u32,
     fast_resize: bool,
+    grey_left_width: Option<(usize, usize)>,
 ) -> Vec<u8> {
+    // let start = Instant::now();
+    let (trim_left, grey_width) = match grey_left_width {
+        Some(x) => x,
+        None => (0, grey.shape()[1]),
+    };
     let mut resizer = create_resizer(
-        grey.shape()[1],
+        grey_width,
         grey.shape()[0],
         width as usize,
         height as usize,
         fast_resize,
     );
-    let mut resized = vec![0f32; (width * height) as usize];
-    resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
-    colorize_grey_vec(resized)
-}
-
-pub fn colorize_part_grey_with_size(
-    grey: ArrayView2<f32>,
-    part_i_w: usize,
-    part_width: usize,
-    width: u32,
-    height: u32,
-    fast_resize: bool,
-) -> Vec<u8> {
-    let mut resizer = create_resizer(
-        part_width,
-        grey.shape()[0],
-        width as usize,
-        height as usize,
-        fast_resize,
-    );
-    let mut resized = vec![0f32; (width * height) as usize];
+    let mut resized = vec![0f32; width as usize * height as usize];
     resizer.resize_stride(
-        &grey.as_slice().unwrap()[part_i_w..],
+        &grey.as_slice().unwrap()[trim_left..],
         grey.shape()[1],
         &mut resized[..],
     );
-    colorize_grey_vec(resized)
-}
-
-pub fn colorize_grey_with_size_to(
-    output: &mut [u8],
-    grey: ArrayView2<f32>,
-    width: u32,
-    height: u32,
-    fast_resize: bool,
-) {
-    let mut resizer = create_resizer(
-        grey.shape()[1] as usize,
-        grey.shape()[0] as usize,
-        width as usize,
-        height as usize,
-        fast_resize,
-    );
-    let mut resized = vec![0f32; (width * height) as usize];
-    resizer.resize(grey.as_slice().unwrap(), &mut resized[..]);
     resized
         .into_iter()
-        .zip(output.chunks_exact_mut(4))
-        .for_each(|(x, y)| {
-            y[..3].copy_from_slice(&convert_grey_to_rgb(x));
-            y[3] = 255;
-        });
+        .flat_map(|x| {
+            convert_grey_to_rgb(x)
+                .into_iter()
+                .chain(iter::once(u8::MAX))
+        })
+        .collect()
+    // println!("drawing spec: {:?}", start.elapsed());
 }
 
 fn draw_wav_directly(wav_avg: &[f32], canvas: &mut Canvas, paint: &Paint) {
@@ -251,9 +201,14 @@ pub fn draw_wav_to(
     wav: ArrayView1<f32>,
     width: u32,
     height: u32,
-    alpha: u8,
     amp_range: (f32, f32),
+    alpha: Option<u8>,
 ) {
+    // let start = Instant::now();
+    let alpha = match alpha {
+        Some(x) => x,
+        None => u8::MAX,
+    };
     let pixmap = PixmapMut::from_bytes(output, width, height).unwrap();
     let mut canvas = Canvas::from(pixmap);
 
@@ -315,12 +270,13 @@ pub fn draw_wav_to(
     } else {
         draw_wav_directly(&wav_avg[..], &mut canvas, &paint);
     }
+    // println!("drawing wav: {:?}", start.elapsed());
 }
 
 pub fn get_colormap_rgba() -> Vec<u8> {
     COLORMAP
         .iter()
-        .flat_map(|x| x.iter().cloned().chain(iter::once(255)))
+        .flat_map(|x| x.iter().cloned().chain(iter::once(u8::MAX)))
         .collect()
 }
 
