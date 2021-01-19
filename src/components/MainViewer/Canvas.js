@@ -5,7 +5,7 @@ const Canvas = forwardRef(({ width, height }, ref) => {
   const time = useRef(0.);
 
   useImperativeHandle(ref, () => ({
-    draw: async (bufs) => {
+    draw: (bufs) => {
       const [buf_spec, buf_wav] = bufs;
       if (!buf_spec && !buf_wav) {
         return;
@@ -22,7 +22,7 @@ const Canvas = forwardRef(({ width, height }, ref) => {
       // const imbmp = await createImageBitmap(imdata);
       // ctx.transferFromImageBitmap(imbmp);
 
-      await requestAnimationFrame(async (timestamp) => {
+      requestAnimationFrame(async (timestamp) => {
         if (time.current === timestamp) return;
         time.current = timestamp;
         const im_spec = new ImageData(new Uint8ClampedArray(buf_spec), width, height);

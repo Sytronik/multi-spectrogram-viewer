@@ -34,7 +34,7 @@ function Tracks({ width, track_ids, getSpecWavImages }) {
     )
   });
   const getIdChArr = () => Object.keys(children.current);
-  async function handleWheel(e) {
+  function handleWheel(e) {
     let y_is_larger;
     let delta;
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -91,12 +91,12 @@ function Tracks({ width, track_ids, getSpecWavImages }) {
         const arr = await promise;
         if (arr) {
           // console.log(arr);
-          await debounced_draw(arr);
+          debounced_draw(arr);
         }
       }
     }, [height, width]);
-  const throttled_draw = useCallback(throttle(1000 / 120, draw), [draw]);
-  const debounced_draw = useCallback(debounce(1000 / 120, draw), [draw]);
+  const throttled_draw = useCallback(throttle(1000 / 60, draw), [draw]);
+  const debounced_draw = useCallback(debounce(1000 / 60, draw), [draw]);
   // const throttled_draw = draw;
   // const debounced_draw = draw;
 
